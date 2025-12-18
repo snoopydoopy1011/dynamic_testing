@@ -1,0 +1,195 @@
+//@version=6
+indicator("Options Flow Engine v2.0 - Strategic Extraction", shorttitle="OFE v2", overlay=false)
+
+// ============================================================================
+// OPTIONS FLOW ENGINE V2.0 - STRATEGIC EXTRACTION APPROACH
+// ============================================================================
+//
+// PROJECT STATUS: Phase 1.1 Step 3 - Auto-Detection Logic Extraction
+//
+// ARCHITECTURE: Strategic Extraction from proven 6000-line Options Volume Profile
+// GOAL: Real-time options flow indicator using actual contract volumes (not synthetic)
+// SESSION: 0DTE trading with proper 9:30 AM ET resets and session persistence
+//
+// EXTERNAL VALIDATION: ✅ Approved by external code reviewer
+// PLANNER VALIDATION: ✅ Approved by Gemini AI in planner role
+//
+// IMPLEMENTATION PLAN:
+// Phase 1: Infrastructure Extraction (lines 1-500, 1080-1110, 1287-1445, 1468-1485, 1534-1650)
+// Phase 2: Flow Calculation Engine (distance weighting + cumulative tracking)
+// Phase 3: Session Persistence & Visualization (refresh survival + plotting)
+//
+// KEY ADVANTAGES OVER V1:
+// - Complete infrastructure extraction (avoids missing dependencies)
+// - Proven volume fetching engine with error handling
+// - Battle-tested session management and strike generation
+// - Rigorous validation checkpoints at each phase
+//
+// TECHNICAL SPECS:
+// - 19 strikes (ATM ±9) using 38/40 TradingView request limit
+// - Distance-weighted flow (ATM=100%, Near=80%, OTM=40%, Deep=10%)
+// - Session cumulative tracking with 9:30 AM ET resets
+// - Request budget: 38/40 with 2-request safety buffer
+//
+// ============================================================================
+
+// ============================================================================
+// PHASE 1.1: INPUT INFRASTRUCTURE EXTRACTION (STEP 1) 
+// Source: Options_volume_main_current.pine lines 5-99
+// Validation: Checkpoint 1 ✅ PASSED - inputs display correctly
+// ============================================================================
+
+// ──────── USER INPUTS ────────────────────────────────────
+
+// ==================== DISPLAY SETTINGS ====================
+useWhiteBackground = input.bool(false, "Use On White Background", tooltip="When enabled, adjusts text colors for white chart background", group="Display Settings")
+
+// ==================== SYMBOL & DATA SETTINGS ====================
+useCustomSymbol = input.bool(false, "Use Custom Base Symbol (Optional - Auto-detected for SPX)", group="Symbol & Data ****** NOTE: SPX now auto-uses SPXW - these settings are for manual override only \n")
+    
+customBaseSymbol = input.string("SPXW", "Custom Base Symbol", tooltip="Enter the base symbol for options (e.g., SPXW for SPX options)", group="Symbol & Data")
+volTF = input.timeframe("D", "Aggregation used for option volume", group="Symbol & Data")
+isSpx = input.bool(false, "Manual SPX/SPXW Mode Override (Optional - Auto-detected)", tooltip="Only check this if auto-detection fails", group="Symbol & Data")
+spxRounding = input.int(10, "SPX Strike Rounding", minval=1, tooltip="Round to nearest value for SPX (typically 5)", group="Symbol & Data")
+
+// ==================== CUSTOM REFERENCE STRIKE SETTINGS ====================
+// NEW: Added custom reference strike settings
+useCustomReferenceStrike = input.bool(false, "Use Custom Reference Strike", tooltip="When enabled, centers the strike grid on a custom price level instead of the current price", group="Custom Reference Strike")
+customReferenceStrike = input.float(0.0, "Custom Reference Strike", tooltip="Enter a custom price level to center the strike grid on", group="Custom Reference Strike")
+autoReferenceMode = input.string("ATM", "Auto Reference Mode", options=["ATM", "POC", "VAH", "VAL"], tooltip="Select which price reference to use when not using custom strike", group="Custom Reference Strike")
+
+// ==================== STRIKE SELECTION SETTINGS ====================
+numStrikesAbove = input.int(9, "Strikes Above ATM", minval = 1, maxval = 19, group="Strike Selection")
+numStrikesBelow = input.int(9, "Strikes Below ATM", minval = 1, maxval = 19, group="Strike Selection")
+
+// ==================== EXPIRATION DATE SETTINGS ====================
+useCurrentDate = input.bool(true, "Use Today's Date for Expiration", group="Expiration Date")
+yearInput = input.int(2025, "Expiry Year", minval = 2023, group="Expiration Date")
+monthInput = input.int(4, "Expiry Month", minval = 1, maxval = 12, group="Expiration Date")
+dayInput = input.int(21, "Expiry Day", minval = 1, maxval = 31, group="Expiration Date")
+
+// ==================== STRIKE PRICE CONFIGURATION ====================
+// Only show these inputs when not in SPX mode
+roundStrikeInput = input.float(1, "Round strikes to nearest", minval = 0.1, step = 0.5,
+                              tooltip="Use 0.5 for half-point strikes, 2.5 for AAPL, etc. Not used when SPX mode is on.",
+                              group="Strike Configuration")
+strikeSpacingInput = input.float(1, "Strike Spacing", minval = 0.1, step = 0.5,
+                                  tooltip="Use 2.5 for AAPL, 1 for SPY/QQQ, etc. Not used when SPX mode is on.",
+                                  group="Strike Configuration")
+baseStrikePattern = input.float(1, "Base Strike Pattern", minval = 0.1, step = 0.1,
+                               tooltip="Use 0.5 for half strikes (most stocks), 1 for SPY/QQQ",
+                               group="Strike Configuration")
+showRoundedVolumes = input.bool(true, "Show Rounded Volumes (k)",
+                              tooltip="When enabled, shows volumes in thousands (e.g., 16k). When disabled, shows full numbers.",
+                              group="Strike Configuration")
+
+
+// ==================== VOLUME PROFILE VISUALIZATION ====================
+showVolumeBars = input.bool(true, "Show Volume Profile", group="Volume Profile Visualization")
+barOffset = input.int(75, "Bar Offset for Display", minval = 0, maxval = 500, group="Volume Profile Visualization")
+maxProfileWidthBars = input.int(50, "Max Profile Width (bars)", minval = 1, maxval = 500, tooltip="Absolute width cap for the longest bar. The biggest‑volume strike will never be drawn more than this many chart bars left of the profile anchor.", group="Volume Profile Visualization")
+//barWidth = input.int(300, "Profile Width (%)", minval = 10, maxval = 500, group="Volume Profile Visualization")
+barOpacity = input.int(0, "Bar Opacity", minval = 0, maxval = 100, group="Volume Profile Visualization")
+barHeightFactor = input.float(1.0, "Bar Height Factor", minval = 0.1, maxval = 5.0, step = 0.1, tooltip="Increase for taller bars, decrease for shorter bars", group="Volume Profile Visualization")
+
+// [NEW] Additional profile visualization settings
+profileBarSpacing = input.float(0.2, "Profile Bar Spacing", minval = 0.0, maxval = 1.0, step = 0.1, tooltip="Adjust spacing between profile bars (0.0 = no spacing, 1.0 = maximum spacing)", group="Volume Profile Visualization")
+showVolumeDeltaPlot = input.bool(false, "Show Volume Delta Plot", tooltip="Display a dotted line showing the Call-Put volume delta at each strike", group="Volume Profile Visualization")
+volumeDeltaColor = input.color(#8833FF, "Volume Delta Line Color", group="Volume Profile Visualization")
+
+// ==================== LABEL SETTINGS ====================
+showLabelsOnBars = input.bool(true, "Show Volume Numbers on Bars", group="Labels")
+showLabelsInside = input.bool(false, "Show Strike Labels Inside Bars", tooltip="When enabled, shows strike labels inside the volume bars instead of next to them", group="Labels")
+showNoStyle = input.bool(false, "Show Labels with No Style")
+labelTextSize = input.string("small", "Label Text Size", options=["tiny","small","normal","large"], group="Labels")
+showLineLabels = input.bool(true, "Show Line Labels", group="Labels")
+labelPosition = input.string("left", "Label Position", options=["left", "right", "center"], group="Labels")
+topStrikesLabelPosition = input.string("right", "Top Strike Label Position", options=["left", "right", "center"], group="Labels")
+barsBack = input.int(100, "Bars Back for center label", minval = 1, maxval = 500, group="Labels")
+volumeLabelOffset = input.int(16, "Volume Label Offset", minval = 1, maxval = 500, group="Labels")
+
+// ==================== TABLE SETTINGS ====================
+// Add this to the "TABLE SETTINGS" section
+tableTextSize = input.string("small", "Table Text Size", options=["tiny","small","normal","large"], group="Table")
+showTable = input.bool(true, "Show Volume Summary Table?", group="Table")
+// [UPDATED] Info Panel Settings - Replace single infoTable with organized panels
+showInfoPanel = input.bool(true, "Show Consolidated Info Panel?", tooltip="Show consolidated options analysis panel", group="Table")
+useHorizontalLayout = input.bool(false, "Use Horizontal Panel Layout", tooltip="Use horizontal 4-section layout instead of vertical stacking", group="Table")
+
+// [NEW] Horizontal Table Dimension Controls
+horizontalTableWidth = input.int(16, "Horizontal Table Width", minval=8, maxval=24, tooltip="Number of columns for horizontal layout (8-24)", group="Table Layout")
+horizontalTableHeight = input.int(7, "Horizontal Table Height", minval=3, maxval=8, tooltip="Number of rows for horizontal layout (3-8)", group="Table Layout")
+
+// Table Position Settings
+tablePosition = input.string("top_right", "Volume Table Position", options=["top_left","top_right","bottom_left","bottom_right"], group="Table")
+infoPanelPosition = input.string("top_center", "Info Panel Position", options=["top_left","top_right","bottom_left","bottom_right", "top_center", "bottom_center"], group="Table")
+// [NEW] Table style settings
+showTableGridLines = input.bool(true, "Show Table Grid Lines", tooltip="Enable/disable grid lines in the summary table", group="Table")
+highlightVolumeThreshold = input.int(100000, "Volume Highlight Threshold", minval = 1000, step = 10000, tooltip="Highlight strikes with volume above this threshold", group="Table")
+
+// ── Black-Scholes Settings ─────────────────────────────────────────────
+riskFreeRate = input.float(0.025, "Risk-Free Rate", step=0.001, group="BS Settings")
+dividendYield = input.float(0.00, "Dividend Yield", step=0.001, group="BS Settings")
+// at top of your inputs section
+// at top of your inputs
+netBiasThreshold = input.float(20.0, "Net‐Bias Neutral Threshold %", step=1) / 100
+sparkThreshold = input.float(0.05, "Sparkline Bias Threshold", step=0.01)
+
+// ============================================================================
+// PHASE 1.1: UTILITY FUNCTIONS EXTRACTION (STEP 2)
+// Source: Options_volume_main_current.pine lines 184-196
+// Validation: Checkpoint 2 ✅ PASSED - functions compile correctly
+// ============================================================================
+
+// ==================== UTILITY FUNCTIONS ====================
+
+f_getSize(s) =>
+     s == "tiny"   ? size.tiny  :
+     s == "small"  ? size.small :
+     s == "normal" ? size.normal:
+                     size.large
+
+f_getTableSize(s) =>
+     s == "tiny"   ? size.tiny  :
+     s == "small"  ? size.small :
+     s == "normal" ? size.normal:
+                     size.large
+
+// ============================================================================
+// PHASE 1.1: AUTO-DETECTION LOGIC EXTRACTION (STEP 3)
+// Source: Options_volume_main_current.pine lines 198-214
+// CRITICAL: Symbol detection chain - autoDetectedSPX → effectiveIsSpx → spacing
+// ============================================================================
+
+// ──────── COMPUTED VARIABLES ────────────────────────────────────────────────────────
+
+// Auto-detect SPX and automatically use SPXW as the ticker for options
+autoDetectedSPX = syminfo.ticker == "SPX"
+// Either use custom symbol if checked, or use SPXW for SPX, otherwise use current ticker
+tickerSymbol = useCustomSymbol ? customBaseSymbol : (autoDetectedSPX ? "SPXW" : syminfo.ticker)
+
+// Auto-determine if we're in SPX mode (either manually checked or auto-detected)
+effectiveIsSpx = isSpx or autoDetectedSPX or syminfo.ticker == "SPXW"
+// Add these variables to get the effective date to use
+effectiveYear = useCurrentDate ? year : yearInput
+effectiveMonth = useCurrentDate ? month : monthInput
+effectiveDay = useCurrentDate ? dayofmonth : dayInput
+
+// Use proper values based on whether we're in SPX mode
+// When in SPX mode, use spxRounding for all values
+effectiveRoundStrike = effectiveIsSpx ? spxRounding : roundStrikeInput
+effectiveSpacing = effectiveIsSpx ? spxRounding : strikeSpacingInput
+
+// ============================================================================
+// VALIDATION CHECKPOINT 3: Auto-Detection Logic
+// Expected: SPX detection works, effectiveIsSpx correct, spacing logic sound
+// Test: Load on SPX (should show effectiveIsSpx=true), SPY (should show false)
+// ============================================================================
+
+// TEMPORARY PLACEHOLDER - Phase 1.1 continuing...
+var float sessionCumulativeFlow = na
+var bool listReady = false
+
+// Basic placeholder plot until full implementation
+plot placeholderLine = 0
+placeholderLine.color = color.gray

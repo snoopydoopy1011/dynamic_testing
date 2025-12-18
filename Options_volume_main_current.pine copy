@@ -1,0 +1,3045 @@
+//@version=6 
+indicator("Options Volume Profile v1.1.0", shorttitle = "Options Volume Profile v1.1.0", overlay = true,
+          dynamic_requests = true, max_bars_back = 1000)
+
+// ──────── USER INPUTS ────────────────────────────────────
+
+// ==================== DISPLAY SETTINGS ====================
+useWhiteBackground = input.bool(false, "Use On White Background", tooltip="When enabled, adjusts text colors for white chart background", group="Display Settings")
+
+// ==================== SYMBOL & DATA SETTINGS ====================
+useCustomSymbol = input.bool(false, "Use Custom Base Symbol (Optional - Auto-detected for SPX)", group="Symbol & Data ****** NOTE: SPX now auto-uses SPXW - these settings are for manual override only \n")
+    
+customBaseSymbol = input.string("SPXW", "Custom Base Symbol", tooltip="Enter the base symbol for options (e.g., SPXW for SPX options)", group="Symbol & Data")
+volTF = input.timeframe("D", "Aggregation used for option volume", group="Symbol & Data")
+isSpx = input.bool(false, "Manual SPX/SPXW Mode Override (Optional - Auto-detected)", tooltip="Only check this if auto-detection fails", group="Symbol & Data")
+spxRounding = input.int(10, "SPX Strike Rounding", minval=1, tooltip="Round to nearest value for SPX (typically 5)", group="Symbol & Data")
+
+// ==================== CUSTOM REFERENCE STRIKE SETTINGS ====================
+// NEW: Added custom reference strike settings
+useCustomReferenceStrike = input.bool(false, "Use Custom Reference Strike", tooltip="When enabled, centers the strike grid on a custom price level instead of the current price", group="Custom Reference Strike")
+customReferenceStrike = input.float(0.0, "Custom Reference Strike", tooltip="Enter a custom price level to center the strike grid on", group="Custom Reference Strike")
+autoReferenceMode = input.string("ATM", "Auto Reference Mode", options=["ATM", "POC", "VAH", "VAL"], tooltip="Select which price reference to use when not using custom strike", group="Custom Reference Strike")
+
+// ==================== STRIKE SELECTION SETTINGS ====================
+numStrikesAbove = input.int(9, "Strikes Above ATM", minval = 1, maxval = 19, group="Strike Selection")
+numStrikesBelow = input.int(9, "Strikes Below ATM", minval = 1, maxval = 19, group="Strike Selection")
+
+// ==================== EXPIRATION DATE SETTINGS ====================
+useCurrentDate = input.bool(true, "Use Today's Date for Expiration", group="Expiration Date")
+yearInput = input.int(2025, "Expiry Year", minval = 2023, group="Expiration Date")
+monthInput = input.int(4, "Expiry Month", minval = 1, maxval = 12, group="Expiration Date")
+dayInput = input.int(21, "Expiry Day", minval = 1, maxval = 31, group="Expiration Date")
+
+// ==================== STRIKE PRICE CONFIGURATION ====================
+// Only show these inputs when not in SPX mode
+roundStrikeInput = input.float(1, "Round strikes to nearest", minval = 0.1, step = 0.5,
+                              tooltip="Use 0.5 for half-point strikes, 2.5 for AAPL, etc. Not used when SPX mode is on.",
+                              group="Strike Configuration")
+strikeSpacingInput = input.float(1, "Strike Spacing", minval = 0.1, step = 0.5,
+                                  tooltip="Use 2.5 for AAPL, 1 for SPY/QQQ, etc. Not used when SPX mode is on.",
+                                  group="Strike Configuration")
+baseStrikePattern = input.float(1, "Base Strike Pattern", minval = 0.1, step = 0.1,
+                               tooltip="Use 0.5 for half strikes (most stocks), 1 for SPY/QQQ",
+                               group="Strike Configuration")
+showRoundedVolumes = input.bool(true, "Show Rounded Volumes (k)",
+                              tooltip="When enabled, shows volumes in thousands (e.g., 16k). When disabled, shows full numbers.",
+                              group="Strike Configuration")
+
+
+// ==================== VOLUME PROFILE VISUALIZATION ====================
+showVolumeBars = input.bool(true, "Show Volume Profile", group="Volume Profile Visualization")
+barOffset = input.int(75, "Bar Offset for Display", minval = 0, maxval = 500, group="Volume Profile Visualization")
+maxProfileWidthBars = input.int(50, "Max Profile Width (bars)", minval = 1, maxval = 500, tooltip="Absolute width cap for the longest bar. The biggest‑volume strike will never be drawn more than this many chart bars left of the profile anchor.", group="Volume Profile Visualization")
+//barWidth = input.int(300, "Profile Width (%)", minval = 10, maxval = 500, group="Volume Profile Visualization")
+barOpacity = input.int(0, "Bar Opacity", minval = 0, maxval = 100, group="Volume Profile Visualization")
+barHeightFactor = input.float(1.0, "Bar Height Factor", minval = 0.1, maxval = 5.0, step = 0.1, tooltip="Increase for taller bars, decrease for shorter bars", group="Volume Profile Visualization")
+
+// [NEW] Additional profile visualization settings
+profileBarSpacing = input.float(0.2, "Profile Bar Spacing", minval = 0.0, maxval = 1.0, step = 0.1, tooltip="Adjust spacing between profile bars (0.0 = no spacing, 1.0 = maximum spacing)", group="Volume Profile Visualization")
+showVolumeDeltaPlot = input.bool(false, "Show Volume Delta Plot", tooltip="Display a dotted line showing the Call-Put volume delta at each strike", group="Volume Profile Visualization")
+volumeDeltaColor = input.color(#8833FF, "Volume Delta Line Color", group="Volume Profile Visualization")
+
+// ==================== LABEL SETTINGS ====================
+showLabelsOnBars = input.bool(true, "Show Volume Numbers on Bars", group="Labels")
+showLabelsInside = input.bool(false, "Show Strike Labels Inside Bars", tooltip="When enabled, shows strike labels inside the volume bars instead of next to them", group="Labels")
+showNoStyle = input.bool(false, "Show Labels with No Style")
+labelTextSize = input.string("small", "Label Text Size", options=["tiny","small","normal","large"], group="Labels")
+showLineLabels = input.bool(true, "Show Line Labels", group="Labels")
+labelPosition = input.string("left", "Label Position", options=["left", "right", "center"], group="Labels")
+topStrikesLabelPosition = input.string("right", "Top Strike Label Position", options=["left", "right", "center"], group="Labels")
+barsBack = input.int(100, "Bars Back for center label", minval = 1, maxval = 500, group="Labels")
+volumeLabelOffset = input.int(16, "Volume Label Offset", minval = 1, maxval = 500, group="Labels")
+
+// ==================== TABLE SETTINGS ====================
+// Add this to the "TABLE SETTINGS" section
+tableTextSize = input.string("small", "Table Text Size", options=["tiny","small","normal","large"], group="Table")
+showTable = input.bool(true, "Show Volume Summary Table?", group="Table")
+// [UPDATED] Info Panel Settings - Replace single infoTable with organized panels
+showInfoPanel = input.bool(true, "Show Consolidated Info Panel?", tooltip="Show consolidated options analysis panel", group="Table")
+useHorizontalLayout = input.bool(false, "Use Horizontal Panel Layout", tooltip="Use horizontal 4-section layout instead of vertical stacking", group="Table")
+
+// [NEW] Horizontal Table Dimension Controls
+horizontalTableWidth = input.int(16, "Horizontal Table Width", minval=8, maxval=24, tooltip="Number of columns for horizontal layout (8-24)", group="Table Layout")
+horizontalTableHeight = input.int(7, "Horizontal Table Height", minval=3, maxval=8, tooltip="Number of rows for horizontal layout (3-8)", group="Table Layout")
+
+// Table Position Settings
+tablePosition = input.string("top_right", "Volume Table Position", options=["top_left","top_right","bottom_left","bottom_right"], group="Table")
+infoPanelPosition = input.string("top_center", "Info Panel Position", options=["top_left","top_right","bottom_left","bottom_right", "top_center", "bottom_center"], group="Table")
+// [NEW] Table style settings
+showTableGridLines = input.bool(true, "Show Table Grid Lines", tooltip="Enable/disable grid lines in the summary table", group="Table")
+highlightVolumeThreshold = input.int(100000, "Volume Highlight Threshold", minval = 1000, step = 10000, tooltip="Highlight strikes with volume above this threshold", group="Table")
+
+// ── Black-Scholes Settings ─────────────────────────────────────────────
+riskFreeRate = input.float(0.025, "Risk-Free Rate", step=0.001, group="BS Settings")
+dividendYield = input.float(0.00, "Dividend Yield", step=0.001, group="BS Settings")
+// at top of your inputs section
+// at top of your inputs
+netBiasThreshold = input.float(20.0, "Net‐Bias Neutral Threshold %", step=1) / 100
+sparkThreshold = input.float(0.05, "Sparkline Bias Threshold", step=0.01)
+
+
+// [NEW] Price Change Settings
+showPriceChangeColumns = input.bool(true, "Show Price Change", tooltip="Show columns for price changes since last bar", group="Price Change Settings")
+priceChangeHighlightThreshold = input.float(0.5, "Price Change Highlight Threshold (%)", minval=0.1, tooltip="Highlight price changes above this percentage", group="Price Change Settings")
+usePriceChangePercent = input.bool(true, "Show Price Change as Percentage", tooltip="Show price changes as percentages rather than absolute values", group="Price Change Settings")
+
+// [NEW] Volume Delta Change Settings
+showVolDeltaChange = input.bool(true, "Show Volume Delta Change", tooltip="Show column for changes in Call-Put volume delta", group="Volume Delta Settings")
+volDeltaChangeHighlightThreshold = input.int(5000, "Vol Delta Change Highlight Threshold", minval=1000, tooltip="Highlight volume delta changes above this threshold", group="Volume Delta Settings")
+
+// [NEW] 5-Period Cumulative Delta Change
+showVolDeltaChange5 = input.bool(true, "Show 5-Period Cumulative ΔΔVol", tooltip="Show column for cumulative volume delta changes over last 5 updates", group="Volume Delta Settings")
+volDeltaChange5HighlightThreshold = input.int(15000, "5-Period ΔΔVol Highlight Threshold", minval=1000, tooltip="Highlight 5-period cumulative changes above this threshold", group="Volume Delta Settings")
+// ==================== LABEL COLLISION SETTINGS ====================
+// [NEW] Label Collision Settings (adapted from GEX)
+enableLabelCollision = input.bool(true, "Enable Label Collision Detection", tooltip="Prevent label overlaps with smart positioning", group="Label Collision")
+collisionMode = input.string("Auto", "Collision Handling Mode", options=["Auto", "Always Combine", "Always Offset"], tooltip="How to handle overlapping labels", group="Label Collision")
+collisionOffsetBars = input.int(3, "Collision Offset (bars)", minval=1, maxval=10, tooltip="Horizontal offset distance for collision avoidance", group="Label Collision")
+
+// ==================== VALUE AREA & POC SETTINGS ====================
+showValueArea = input.bool(true, "Show Value Area and POC", group="Value Area & POC")
+showTopVolumeStrike = input.bool(true, "Show Top Volume Strikes Line", group="Value Area & POC")
+valueAreaPercent = input.int(70, "Value Area Percentage", minval = 50, maxval = 90, group="Value Area & POC")
+pocColor = input.color(color.yellow, "POC Line Color", group="Value Area & POC")
+vahColor = input.color(color.blue, "VAH Line Color", group="Value Area & POC")
+valColor = input.color(color.blue, "VAL Line Color", group="Value Area & POC")
+lineWidth = input.int(2, "Line Width", minval = 1, maxval = 4, group="Value Area & POC")
+lineStyle = input.string("dashed", "Line Style", options=["solid", "dashed", "dotted"], group="Value Area & POC")
+extendToLeft = input.bool(false, "Extend Lines to Chart Left", tooltip="When enabled, lines will extend to the left edge of the chart", group="Value Area & POC")
+
+// ==================== SECONDARY LINES (BK DAILY RANGE) ====================
+showSecondaryLines = input.bool(true, "Show BK Daily Range (20K Volume Threshold)", group="Secondary Lines")
+volumeThreshold = input.int(20000, "Volume Threshold for Secondary Lines", minval = 1000, step = 1000, group="Secondary Lines")
+secondaryVahColor = input.color(color.purple, "Secondary VAH Line Color", group="Secondary Lines")
+secondaryValColor = input.color(color.purple, "Secondary VAL Line Color", group="Secondary Lines")
+secondaryLineWidth = input.int(1, "Secondary Line Width", minval = 1, maxval = 4, group="Secondary Lines")
+secondaryLineStyle = input.string("dotted", "Secondary Line Style", options=["solid", "dashed", "dotted"], group="Secondary Lines")
+
+// ==================== CLOUD VISUALIZATION SETTINGS ====================
+showCloud = input.bool(true, "Show Value Area Cloud", group="======= Cloud Visualization =======")
+cloudColor = input.color(color.new(color.blue, 90), "Cloud Color", group="======= Cloud Visualization =======")
+showSecondaryCloud = input.bool(true, "Show Secondary VAH/VAL Cloud", group="======= Cloud Visualization =======")
+secondaryCloudColor = input.color(color.new(color.purple, 95), "Secondary Cloud Color", group="======= Cloud Visualization =======")
+
+// ==================== RANKED VOLUME COLORS (NEW) ====================
+// Define base colors for ranks (without transparency)
+color callColorRank1Base = input.color(color.new(color.lime, 0), "Call Vol Rank 1 Color", group="Ranked Volume Colors")
+color callColorRank2Base = input.color(color.new(#00B000, 0), "Call Vol Rank 2 Color", group="Ranked Volume Colors") // Slightly darker green
+color callColorRank3Base = input.color(color.new(#008000, 0), "Call Vol Rank 3 Color", group="Ranked Volume Colors") // Darker green
+color callColorOtherBase = input.color(color.new(#005000, 0), "Call Vol Other Color", group="Ranked Volume Colors") // Darkest green
+
+color putColorRank1Base = input.color(color.new(color.red, 0), "Put Vol Rank 1 Color", group="Ranked Volume Colors")
+color putColorRank2Base = input.color(color.new(#C80000, 0), "Put Vol Rank 2 Color", group="Ranked Volume Colors") // Slightly darker red
+color putColorRank3Base = input.color(color.new(#A00000, 0), "Put Vol Rank 3 Color", group="Ranked Volume Colors") // Darker red
+color putColorOtherBase = input.color(color.new(#640000, 0), "Put Vol Other Color", group="Ranked Volume Colors") // Darkest red
+
+// [NEW] DISTANCE ARROWS TO KEY STRIKES SETTINGS
+showDistanceArrows = input.bool(true, "Show Distance Arrows to Key Strikes", group="Distance Arrows")
+distanceArrowColor = input.color(color.yellow, "Arrow Color", group="Distance Arrows")
+showTopCallStrikeArrow = input.bool(true, "Show Arrow to Top Call Strike", group="Distance Arrows")
+showTopPutStrikeArrow = input.bool(true, "Show Arrow to Top Put Strike", group="Distance Arrows")
+arrowLabelSize = input.string("small", "Arrow Label Size", options=["tiny","small","normal","large"], group="Distance Arrows")
+
+// ==================== IMPLIED MOVE LINES SETTINGS ====================
+showImpliedMoveLines = input.bool(true, "Show Implied Move Lines", group="Implied Move Lines")
+staticImpliedMoveColor = input.color(color.new(color.yellow, 0), "Static Implied Move Color", group="Implied Move Lines")
+dynamicImpliedMoveColor = input.color(color.new(color.lime, 0), "Dynamic Implied Move Color", group="Implied Move Lines")
+impliedMoveLineWidth = input.int(2, "Implied Move Line Width", minval = 1, maxval = 4, group="Implied Move Lines")
+impliedMoveLineStyle = input.string("dashed", "Implied Move Line Style", options=["solid", "dashed", "dotted"], group="Implied Move Lines")
+showImpliedMovePriceLabels = input.bool(true, "Show Implied Move Price Labels", group="Implied Move Lines")
+
+// ==================== NARRATIVE DASHBOARD SETTINGS ====================
+// [NEW] Enhanced storytelling settings for Market Sentiment panel
+// STEP 1: Removed enableNarrativeDashboard toggle - now using unified approach
+putBullishThreshold = input.float(1.5, "Put Bullish Threshold", minval=1.0, maxval=3.0, step=0.1, tooltip="Ratio threshold for bullish put positioning (Puts OTM > ITM+ATM)", group="🎯 Narrative Dashboard")
+putBearishThreshold = input.float(0.7, "Put Bearish Threshold", minval=0.1, maxval=1.0, step=0.1, tooltip="Ratio threshold for bearish put positioning (Puts ITM+ATM > OTM)", group="🎯 Narrative Dashboard")
+callHedgingThresholdHigh = input.float(1.5, "Call Hedging Threshold (High)", minval=1.0, maxval=3.0, step=0.1, tooltip="Ratio threshold for bearish call hedging (Calls ITM > OTM+ATM)", group="🎯 Narrative Dashboard")
+callHedgingThresholdLow = input.float(0.7, "Call Hedging Threshold (Low)", minval=0.1, maxval=1.0, step=0.1, tooltip="Ratio threshold for bullish call hedging (Calls OTM+ATM > ITM)", group="🎯 Narrative Dashboard")
+showPositioningRatios = input.bool(true, "Show Positioning Ratios", tooltip="Display precise ratios when signals are significant", group="🎯 Narrative Dashboard")
+useEmojiIndicators = input.bool(true, "Use Emoji Indicators", tooltip="Add emoji visual indicators to narrative text", group="🎯 Narrative Dashboard")
+
+// ==================== UTILITY FUNCTIONS ====================
+
+f_getSize(s) =>
+     s == "tiny"   ? size.tiny  :
+     s == "small"  ? size.small :
+     s == "normal" ? size.normal:
+                     size.large
+
+f_getTableSize(s) =>
+     s == "tiny"   ? size.tiny  :
+     s == "small"  ? size.small :
+     s == "normal" ? size.normal:
+                     size.large
+
+// ──────── COMPUTED VARIABLES ────────────────────────────────────────────────────────
+
+// Auto-detect SPX and automatically use SPXW as the ticker for options
+autoDetectedSPX = syminfo.ticker == "SPX"
+// Either use custom symbol if checked, or use SPXW for SPX, otherwise use current ticker
+tickerSymbol = useCustomSymbol ? customBaseSymbol : (autoDetectedSPX ? "SPXW" : syminfo.ticker)
+
+// Auto-determine if we're in SPX mode (either manually checked or auto-detected)
+effectiveIsSpx = isSpx or autoDetectedSPX or syminfo.ticker == "SPXW"
+// Add these variables to get the effective date to use
+effectiveYear = useCurrentDate ? year : yearInput
+effectiveMonth = useCurrentDate ? month : monthInput
+effectiveDay = useCurrentDate ? dayofmonth : dayInput
+
+// Use proper values based on whether we're in SPX mode
+// When in SPX mode, use spxRounding for all values
+effectiveRoundStrike = effectiveIsSpx ? spxRounding : roundStrikeInput
+effectiveSpacing = effectiveIsSpx ? spxRounding : strikeSpacingInput
+
+// Detect SPX and if we're NOT on 5-min chart
+is5MinTimeframe = (timeframe.period == "5")
+
+// Helper variables for sizing and calculations
+tblSize = f_getTableSize(tableTextSize)
+txtSize = f_getSize(labelTextSize)
+arrowTxtSize = f_getSize(arrowLabelSize)
+
+// Helper variables for bias calculations and timing
+biasLabel = ""
+var color biasColor = na
+strengthMeter = ""
+strengthMeterLabel = ""
+valTxt = ""
+atmLive = close
+labelOffset = barstate.isconfirmed ? 0 : 1
+isRthOpen = (hour == 9 and minute == 30)
+isToday = (dayofmonth == effectiveDay and month == effectiveMonth and year == effectiveYear)
+
+// ──────── STATE VARIABLES (VAR DECLARATIONS) ─────────────────────────────────────────
+
+// ==================== UI ELEMENTS - LABELS ====================
+var label warningLabel = na
+var label atmPointer = na
+var label pocPointer = na
+var label pocTablePointer = na
+var label staticLegendLabel = na
+var label dynamicLegendLabel = na
+
+// ==================== UI ELEMENTS - LINES ====================
+var line pocLine = na
+var line vahLine = na
+var line valLine = na
+var line topPut = na
+var line topCall = na
+var line secondaryVahLine = na
+var line secondaryValLine = na
+var line staticUpperImpliedMoveLine = na
+var line staticLowerImpliedMoveLine = na
+var line dynamicUpperImpliedMoveLine = na
+var line dynamicLowerImpliedMoveLine = na
+
+// ==================== UI ELEMENTS - LABELS FOR LINES ====================
+var label staticUpperImpliedMoveLabel = na
+var label staticLowerImpliedMoveLabel = na
+var label dynamicUpperImpliedMoveLabel = na
+var label dynamicLowerImpliedMoveLabel = na
+
+// ==================== UI ELEMENTS - BOXES/CLOUDS ====================
+var box valueAreaCloud = na
+var box secondaryValueAreaCloud = na
+
+// ==================== UI ELEMENTS - PANEL ====================
+// [NEW] Panel variables (adapted from GEX)
+var table optionsPanel = na
+
+// ==================== COLLISION TRACKING SYSTEM ====================
+// [NEW] Collision detection data structures (adapted from GEX)
+type LabelTypeMap
+    map<string, label> typeToLabel
+
+var array<float> collisionPriceTracker = array.new_float()
+var array<int> collisionOffsetTracker = array.new_int()  
+var array<int> collisionCountTracker = array.new_int()
+var map<string, LabelTypeMap> labelCollisionTracker = map.new<string, LabelTypeMap>()
+
+// ==================== SENTIMENT & ANALYSIS STATE ====================
+var string currentSentiment = na
+var string previousSentiment = na
+var string ivWing = na
+var string sentimentShift = "→ Initial Reading"
+var color sentimentShiftColor = color.white
+var int sentimentDuration = 0
+var float sentimentStrength = 0.0
+var float sentimentConfidence = 0.0
+var string sentimentLabel = na
+var string primarySentiment = na
+var string hedgingSentiment = na
+var string strengthLabel = na
+var string formattedSentimentLabel = na
+var string durationDisplay = ""
+var float globalSentimentConfidence = 0.0
+var string globalSentimentLabel = na
+
+// ==================== SKEW & BIAS CALCULATIONS ====================
+var float globalCallSkew = 0.0
+var float globalPutSkew = 0.0
+var float globalDirectionalSkew = 0.0
+var string globalSkewText = ""
+var color globalSkewColor = na
+var float impliedVolSkew = na
+var float prevBiasDiff = na
+var float biasDiff = na
+var float biasDiffDelta = na
+
+// ==================== RATIO & MOMENTUM CALCULATIONS ====================
+var float globalPrimaryRatio = na
+var float globalHedgeRatio = na
+var float directionDeltaPercentage = 0.0
+var float prevPrimaryRatio = 0.0
+var float prevHedgingRatio = 0.0
+var float impliedVolatilitySkew = 0.0
+var float sentimentConsistencyScore = 0.0
+
+// ==================== NARRATIVE DASHBOARD VARIABLES ====================
+// [NEW] Enhanced positioning ratios for storytelling
+var float putPositionRatio = na
+var float callPositionRatio = na
+var string putNarrative = na
+var string callNarrative = na  
+var color putRowBgColor = na
+var color callRowBgColor = na
+var string putDisplayText = na
+var string callDisplayText = na
+var string enhancedConsensus = na
+var string putRatioText = ""
+var string callRatioText = ""
+
+// ==================== IMPLIED MOVE CALCULATIONS ====================
+var float impliedMoveBS = na
+var float staticImpliedMoveBS = na
+var float dynamicImpliedMoveBS = na
+var float marketOpenPrice = na
+
+// ==================== PRICE LEVEL TRACKING ====================
+var float pocLevel = na
+var float vahLevel = na
+var float valLevel = na
+var float secondaryVahLevel = na
+var float secondaryValLevel = na
+var float topCallStrike = na
+var float topPutStrike = na
+var float anchorOpen = na
+var float referencePrice = na
+
+// ==================== CALCULATION RESULTS ====================
+var float calculatedConfidence = na
+var string confIndicator = ""
+var color confIndicatorColor = na
+var color trendCol = na
+
+// ==================== TIMING & STATE CONTROL ====================
+var int openingBarIndex = na
+var int mostRecentOpenTimeBarIndex = na
+var bool listReady = false
+var bool dataFullyLoaded = false
+
+// ==================== DATA ARRAYS - MAIN STRIKE DATA ====================
+var string[] callSyms = array.new_string()
+var string[] putSyms = array.new_string()
+var float[] callVols = array.new_float()
+var float[] putVols = array.new_float()
+var float[] strikePrices = array.new_float()
+var float[] totalVols = array.new_float()
+var float[] callPrices = array.new_float()
+var float[] putPrices = array.new_float()
+
+// ==================== DATA ARRAYS - RATIOS & DELTAS ====================
+var float[] callPutRatios = array.new_float()
+var float[] volumeDeltas = array.new_float()
+var float[] sentimentHistory = array.new_float()
+
+// ==================== DATA ARRAYS - PREVIOUS VALUES & CHANGES ====================
+var float[] prevPutVols = array.new_float()
+var float[] prevCallVols = array.new_float()
+var float[] prevCallPrices = array.new_float()
+var float[] prevPutPrices = array.new_float()
+var float[] callPriceChanges = array.new_float()
+var float[] putPriceChanges = array.new_float()
+var float[] prevVolumeDeltas = array.new_float()
+var float[] volumeDeltaChanges = array.new_float()
+
+// [NEW] 5-Period Delta Change History
+// Flattened array: for each strike, stores last 5 delta changes
+// Layout: [strike0_t0, strike0_t1, strike0_t2, strike0_t3, strike0_t4, strike1_t0, ...]
+var float[] deltaChangeHistory = array.new_float()
+var float[] volumeDeltaChanges5 = array.new_float()  // Sum of last 5 changes per strike
+
+// [NEW] Sorted version for table display
+var float[] sortedVolumeDeltaChanges5 = array.new_float()
+
+// ==================== DATA ARRAYS - ANALYSIS & CALCULATIONS ====================
+var float[] ivOTMStrikes = array.new_float()
+var float[] weightedStrikeVols = array.new_float()
+var color[] sparklineColors = array.new_color()
+
+// ==================== DATA ARRAYS - SORTED DATA ====================
+var float[] sortedTotalVols = array.new_float()
+var float[] sortedStrikes = array.new_float()
+var float[] sortedCallVols = array.new_float()
+var float[] sortedPutVols = array.new_float()
+var float[] sortedCallPrices = array.new_float()
+var float[] sortedPutPrices = array.new_float()
+var float[] sortedCallPriceChanges = array.new_float()
+var float[] sortedPutPriceChanges = array.new_float()
+var float[] sortedCallPutRatios = array.new_float()
+var float[] sortedVolumeDelta = array.new_float()
+var float[] sortedVolumeDeltaChanges = array.new_float()
+// ==================== DATA ARRAYS - CONFIRMED VALUES (for persistence across bars) ====================
+// [NEW] These store values at last bar confirmation - don't reset during live bar
+// ==================== DATA ARRAYS - CONFIRMED VALUES (for persistence across bars) ====================
+var float[] confirmedVolumeDeltas = array.new_float()
+var float[] confirmedDeltaChanges = array.new_float()
+var float[] displayDeltaChanges = array.new_float()  // [NEW] What to show in table - persists last non-zero value
+var float[] displayDeltaChanges5 = array.new_float()  // [NEW] Display value for 5-period
+
+// [NEW] 5-Period Delta Change History - stores last 4 CONFIRMED changes (5th is always live)
+// Flattened array: for each strike, stores last 4 confirmed delta changes
+// Layout: [strike0_t-4, strike0_t-3, strike0_t-2, strike0_t-1, strike1_t-4, ...]
+
+
+// ==================== UI ARRAYS - VISUAL ELEMENTS ====================
+var label[] strikeLbls = array.new<label>()
+var box[] callBoxes = array.new<box>()
+var box[] putBoxes = array.new<box>()
+var label[] lineLbls = array.new<label>()
+var label[] distanceArrowLabels = array.new<label>()
+var line[] volumeDeltaLines = array.new<line>()
+
+// ==================== COLLISION DETECTION SYSTEM ====================
+// User-defined type for nested collection (PineScript requirement)
+getInfoPanelPosition(positionString) =>
+    switch positionString
+        "top_left" => position.top_left
+        "top_right" => position.top_right
+        "bottom_left" => position.bottom_left
+        "bottom_right" => position.bottom_right
+        "middle_left" => position.middle_left
+        "middle_right" => position.middle_right
+        "top_center" => position.top_center
+        "bottom_center" => position.bottom_center
+        => position.top_left
+
+// ==================== UI TABLES ====================
+var int baseRows = 1 + 1 + numStrikesAbove + numStrikesBelow + 1 + 7 + 3 + (showSecondaryLines ? 2 : 0)
+var table volTable = table.new(tablePosition, 14, baseRows, border_width = showTableGridLines ? 1 : 0, border_color = color.new(color.gray, 30))
+// [NEW] Consolidated Info Panel - Single table in top center with organized sections
+// Dynamic table dimensions: 16×5 for horizontal layout, 4×20 for vertical layout
+var table infoPanel = table.new(getInfoPanelPosition(infoPanelPosition), 
+                               useHorizontalLayout ? horizontalTableWidth : 4, 
+                               useHorizontalLayout ? horizontalTableHeight : 20, 
+                               bgcolor=color.new(color.black, 85), 
+                               border_width=1, 
+                               border_color=color.gray)
+
+// ──────── FUNCTIONS ──────────────────────────────────────────────────────────────────
+
+// ==================== DYNAMIC TABLE LAYOUT FUNCTIONS ====================
+
+// Dynamic section column allocation with overflow protection
+calculateSectionColumns(totalWidth) =>
+    // Input validation - handle edge cases
+    if totalWidth <= 0
+        [0, 0, 0, 0]
+    else
+        // Base column requirements for each section
+        priceColsNeeded = 3     // Price Levels: POC, VAH, VAL + distance
+        sentimentColsNeeded = 4 // Market Sentiment: Bias, Hedge, Consensus, Confidence  
+        analyticsColsNeeded = 4 // Options Analytics: VW-DIM, Skew, IV, ImpliedMove
+        flowColsNeeded = 3      // Flow Dynamics: Volume momentum, hedge momentum, net bias
+        
+        totalNeeded = priceColsNeeded + sentimentColsNeeded + analyticsColsNeeded + flowColsNeeded
+        
+        if totalWidth >= totalNeeded
+            // Distribute extra columns proportionally
+            extraCols = totalWidth - totalNeeded
+            priceCols = priceColsNeeded + math.floor(extraCols * 0.2)
+            sentimentCols = sentimentColsNeeded + math.floor(extraCols * 0.3)
+            analyticsCols = analyticsColsNeeded + math.floor(extraCols * 0.3)
+            flowCols = flowColsNeeded + math.floor(extraCols * 0.2)
+
+            // Distribute any remaining columns to prevent total mismatch
+            remainingCols = totalWidth - (priceCols + sentimentCols + analyticsCols + flowCols)
+            if remainingCols > 0
+                // Add to the largest sections first
+                if remainingCols >= 2
+                    sentimentCols := sentimentCols + 1
+                    analyticsCols := analyticsCols + 1
+                    remainingCols := remainingCols - 2
+                if remainingCols > 0
+                    sentimentCols := sentimentCols + remainingCols
+            
+            [priceCols, sentimentCols, analyticsCols, flowCols]
+        else
+            // Compress sections proportionally with minimum viable columns
+            priceCols = math.max(2, math.floor(totalWidth * 0.2))
+            sentimentCols = math.max(3, math.floor(totalWidth * 0.3))
+            analyticsCols = math.max(3, math.floor(totalWidth * 0.3))
+            flowCols = math.max(2, math.floor(totalWidth * 0.2))
+
+            // Handle overflow: reduce largest sections if sum exceeds totalWidth
+            summedCols = priceCols + sentimentCols + analyticsCols + flowCols
+            if summedCols > totalWidth
+                diff = summedCols - totalWidth
+                // Reduce sentiment first (largest), then analytics
+                if sentimentCols > 3 and diff > 0
+                    reduction = math.min(diff, sentimentCols - 3)
+                    sentimentCols := sentimentCols - reduction
+                    diff := diff - reduction
+                if analyticsCols > 3 and diff > 0
+                    reduction = math.min(diff, analyticsCols - 3)
+                    analyticsCols := analyticsCols - reduction
+                    diff := diff - reduction
+                if priceCols > 2 and diff > 0
+                    reduction = math.min(diff, priceCols - 2)
+                    priceCols := priceCols - reduction
+                    diff := diff - reduction
+                if flowCols > 2 and diff > 0
+                    reduction = math.min(diff, flowCols - 2)
+                    flowCols := flowCols - reduction
+
+            // CRITICAL FIX: Ensure minimums are still met after reduction
+            priceCols := math.max(2, priceCols)
+            sentimentCols := math.max(3, sentimentCols)
+            analyticsCols := math.max(3, analyticsCols)
+            flowCols := math.max(2, flowCols)
+            
+            [priceCols, sentimentCols, analyticsCols, flowCols]
+
+// Calculate section starting columns based on allocated widths
+calculateSectionStarts(priceCols, sentimentCols, analyticsCols, flowCols) =>
+    priceStart = 0
+    sentimentStart = priceStart + priceCols
+    analyticsStart = sentimentStart + sentimentCols
+    flowStart = analyticsStart + analyticsCols
+    [priceStart, sentimentStart, analyticsStart, flowStart]
+
+// ==================== COLLISION DETECTION FUNCTIONS ====================
+
+// Level types for collision detection
+LEVEL_TYPE_POC = "POC"
+LEVEL_TYPE_VAH = "VAH"
+LEVEL_TYPE_VAL = "VAL"
+LEVEL_TYPE_IMPLIED_MOVE = "IMPLIED_MOVE"
+LEVEL_TYPE_WARNING = "WARNING"
+
+// Enhanced collision detection function for Options labels
+getOptionsLabelOffset(price, levelType, maxOffset = 20, useOffset = true) =>
+    if not useOffset
+        0
+    else
+        index = -1
+        priceKey = str.tostring(price)
+        
+        // Search for existing price level within 1 tick tolerance
+        if array.size(collisionPriceTracker) > 0
+            for i = 0 to array.size(collisionPriceTracker) - 1
+                if math.abs(array.get(collisionPriceTracker, i) - price) < syminfo.mintick
+                    index := i
+                    break
+        
+        if index >= 0
+            // Found existing price - increment collision count
+            count = array.get(collisionCountTracker, index) + 1
+            array.set(collisionCountTracker, index, count)
+            
+            // Calculate offset using modulo to cycle through available positions
+            offset = count % maxOffset
+            array.set(collisionOffsetTracker, index, offset)
+            offset
+        else
+            // New price level - add to tracking arrays
+            array.push(collisionPriceTracker, price)
+            array.push(collisionCountTracker, 1)
+            array.push(collisionOffsetTracker, 0)
+            0  // First label at this price gets offset 0
+
+// Check if two prices are within proximity threshold
+isWithinProximity(price1, price2, threshold) =>
+    math.abs(price1 - price2) <= threshold
+
+// Create collision-aware label with automatic offset
+// Create collision-aware label with automatic offset
+createCollisionAwareLabel(x, y, labelText, labelType, string style = na, color labelColor = na, color textcolor = na, string size = na) =>
+    // Handle default values inside the function
+    actualStyle = na(style) ? label.style_none : style
+    actualColor = na(labelColor) ? color.new(color.black, 100) : labelColor
+    actualTextColor = na(textcolor) ? color.white : textcolor
+    actualSize = na(size) ? size.small : size
+    
+    // Get horizontal offset to prevent collision
+    offset = getOptionsLabelOffset(y, labelType)
+    
+    // Apply offset to x position
+    adjustedX = x + offset
+    
+    // Create label with collision tracking
+    newLabel = label.new(adjustedX, y, labelText, style = actualStyle, color = actualColor, textcolor = actualTextColor, size = actualSize)
+    
+    // Track this label in the collision system
+    priceKey = str.tostring(y)
+    if not map.contains(labelCollisionTracker, priceKey)
+        newTypeMap = map.new<string, label>()
+        newLabelTypeMap = LabelTypeMap.new(typeToLabel = newTypeMap)
+        map.put(labelCollisionTracker, priceKey, newLabelTypeMap)
+    
+    labelTypeMapForPrice = map.get(labelCollisionTracker, priceKey)
+    typeMapForPrice = labelTypeMapForPrice.typeToLabel
+    map.put(typeMapForPrice, labelType, newLabel)
+    
+    newLabel
+
+// ==================== PANEL DISPLAY FUNCTIONS ====================
+
+// Create progress bar visualization for metrics
+createMetricsProgressBar(percentage, barLength = 10) =>
+    // Use floor to show only completed progress
+    filledBars = math.floor(percentage / 100.0 * barLength)
+    emptyBars = barLength - filledBars
+    
+    filled = str.repeat("█", filledBars)
+    empty = str.repeat("░", emptyBars)
+    "[" + filled + empty + "]"
+
+// Get panel position from string
+// Enhanced position mapping for info panels
+
+
+
+
+// ==================== CONSOLIDATED INFO PANEL FUNCTION ====================
+
+// Consolidated Info Panel - Combines all market data into organized sections
+updateConsolidatedInfoPanel() =>
+    if showInfoPanel and barstate.islast and listReady
+        // Clear the entire table
+        table.clear(infoPanel, 0, 0, 4, 20)
+        
+        currentRow = 0
+        
+        // ==================== PRICE LEVELS SECTION ====================
+        // Header - merge cells across all 4 columns
+        table.cell(infoPanel, 0, currentRow, "PRICE LEVELS", 
+                  text_color=color.white, text_size=tblSize, 
+                  bgcolor=color.new(color.blue, 70))
+        table.merge_cells(infoPanel, 0, currentRow, 3, currentRow)
+        currentRow += 1
+        
+        // POC Level
+        if not na(pocLevel)
+            table.cell(infoPanel, 0, currentRow, "POC:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, 1, currentRow, str.tostring(pocLevel, "#.00"), text_color=pocColor, text_size=tblSize)
+            table.cell(infoPanel, 2, currentRow, "Dist:", text_color=color.white, text_size=tblSize)
+            pocDist = math.abs(close - pocLevel) / close * 100
+            table.cell(infoPanel, 3, currentRow, str.tostring(pocDist, "#.1") + "%", 
+                      text_color=pocDist < 1 ? color.green : pocDist < 3 ? color.yellow : color.red, text_size=tblSize)
+            currentRow += 1
+        
+        // VAH Level
+        if not na(vahLevel)
+            table.cell(infoPanel, 0, currentRow, "VAH:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, 1, currentRow, str.tostring(vahLevel, "#.00"), text_color=vahColor, text_size=tblSize)
+            table.cell(infoPanel, 2, currentRow, "Dist:", text_color=color.white, text_size=tblSize)
+            vahDist = math.abs(close - vahLevel) / close * 100
+            table.cell(infoPanel, 3, currentRow, str.tostring(vahDist, "#.1") + "%", 
+                      text_color=vahDist < 1 ? color.green : vahDist < 3 ? color.yellow : color.red, text_size=tblSize)
+            currentRow += 1
+        
+        // VAL Level
+        if not na(valLevel)
+            table.cell(infoPanel, 0, currentRow, "VAL:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, 1, currentRow, str.tostring(valLevel, "#.00"), text_color=valColor, text_size=tblSize)
+            table.cell(infoPanel, 2, currentRow, "Dist:", text_color=color.white, text_size=tblSize)
+            valDist = math.abs(close - valLevel) / close * 100
+            table.cell(infoPanel, 3, currentRow, str.tostring(valDist, "#.1") + "%", 
+                      text_color=valDist < 1 ? color.green : valDist < 3 ? color.yellow : color.red, text_size=tblSize)
+            currentRow += 1
+        
+        // ==================== MARKET SENTIMENT SECTION ====================
+        // Header
+        table.cell(infoPanel, 0, currentRow, "MARKET SENTIMENT", 
+                  text_color=color.white, text_size=tblSize, 
+                  bgcolor=color.new(color.green, 70))
+        table.merge_cells(infoPanel, 0, currentRow, 3, currentRow)
+        currentRow += 1
+        
+        // Directional bias
+        float dirPct = globalPrimaryRatio * 100
+        string dirArrow = primarySentiment == "Bullish" ? "↑" : primarySentiment == "Bearish" ? "↓" : "→"
+        color dirColor = dirPct > 0 ? color.green : dirPct < 0 ? color.red : color.yellow
+        
+        table.cell(infoPanel, 0, currentRow, "Bias:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, primarySentiment, text_color=dirColor, text_size=tblSize)
+        table.cell(infoPanel, 2, currentRow, str.tostring(dirPct, "#.0") + "%", text_color=dirColor, text_size=tblSize)
+        table.cell(infoPanel, 3, currentRow, dirArrow, text_color=dirColor, text_size=tblSize)
+        currentRow += 1
+        
+        // Hedging sentiment
+        float hdgPct = globalHedgeRatio * 100
+        string hdgArrow = hedgingSentiment == "Bullish Hedging" ? "↑" : hedgingSentiment == "Bearish Hedging" ? "↓" : "→"
+        color hdgColor = hdgPct > netBiasThreshold*100 ? color.green : hdgPct < -netBiasThreshold*100 ? color.red : color.yellow
+        
+        table.cell(infoPanel, 0, currentRow, "Hedge:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, hedgingSentiment, text_color=hdgColor, text_size=tblSize)
+        table.cell(infoPanel, 2, currentRow, str.tostring(hdgPct, "#.0") + "%", text_color=hdgColor, text_size=tblSize)
+        table.cell(infoPanel, 3, currentRow, hdgArrow, text_color=hdgColor, text_size=tblSize)
+        currentRow += 1
+        
+        // Consensus analysis
+        string biasLabel = ""
+        string strengthMeter = ""
+        color biasColor = color.white
+        
+        if dirPct > 0 and hdgPct > 0
+            float consensus = math.sqrt(dirPct * hdgPct)
+            int blockCount = math.round(math.min(consensus / 20, 5))
+            for i = 1 to 5
+                strengthMeter := strengthMeter + (i <= blockCount ? "■" : "□")
+            biasLabel := "Bullish Consensus"
+            biasColor := consensus > 50 ? color.rgb(0, 150, 0) : color.rgb(100, 200, 100)
+        else if dirPct < 0 and hdgPct < 0
+            float consensus = math.sqrt(math.abs(dirPct * hdgPct))
+            int blockCount = math.round(math.min(consensus / 20, 5))
+            for i = 1 to 5
+                strengthMeter := strengthMeter + (i <= blockCount ? "■" : "□")
+            biasLabel := "Bearish Consensus"
+            biasColor := consensus > 50 ? color.rgb(180, 0, 0) : color.rgb(220, 100, 100)
+        else
+            float netPct = dirPct + hdgPct
+            biasLabel := "Mixed Signals"
+            biasColor := netPct > 30 ? color.green : netPct < -30 ? color.red : color.yellow
+            strengthMeter := "◊◊◊◊◊"
+        
+        table.cell(infoPanel, 0, currentRow, "Signal:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, biasLabel, text_color=biasColor, text_size=tblSize)
+        table.merge_cells(infoPanel, 2, currentRow, 3, currentRow)
+        table.cell(infoPanel, 2, currentRow, strengthMeter, text_color=biasColor, text_size=tblSize)
+        currentRow += 1
+        
+        // Confidence
+        string confidenceText = str.tostring(math.round(calculatedConfidence)) + "%"
+        string confIndicator = calculatedConfidence > 70 ? "✓" : calculatedConfidence > 50 ? "~" : "✗"
+        color confColor = calculatedConfidence > 70 ? color.green : calculatedConfidence > 50 ? color.yellow : color.red
+        
+        table.cell(infoPanel, 0, currentRow, "Confidence:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, confidenceText, text_color=confColor, text_size=tblSize)
+        table.cell(infoPanel, 2, currentRow, confIndicator, text_color=confColor, text_size=tblSize)
+        table.cell(infoPanel, 3, currentRow, "", text_color=color.white, text_size=tblSize)
+        currentRow += 1
+        
+        // ==================== OPTIONS ANALYTICS SECTION ====================
+        // Header
+        table.cell(infoPanel, 0, currentRow, "OPTIONS ANALYTICS", 
+                  text_color=color.white, text_size=tblSize, 
+                  bgcolor=color.new(color.purple, 70))
+        table.merge_cells(infoPanel, 0, currentRow, 3, currentRow)
+        currentRow += 1
+        
+        // VW-DIM (Volume-Weighted Distance-In-Moneyness)
+        table.cell(infoPanel, 0, currentRow, "VW-DIM:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, str.tostring(math.abs(globalCallSkew), "#.##"), 
+                  text_color=globalCallSkew > 0 ? color.green : color.red, text_size=tblSize)
+        
+        // Skew
+        table.cell(infoPanel, 2, currentRow, "Skew:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 3, currentRow, globalSkewText, text_color=globalSkewColor, text_size=tblSize)
+        currentRow += 1
+        
+        // IV Skew
+        table.cell(infoPanel, 0, currentRow, "IV Skew:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, na(impliedVolSkew) ? "n/a" : str.tostring(impliedVolSkew, "#.00") + "%", 
+                  text_color=impliedVolSkew > 0 ? color.green : impliedVolSkew < 0 ? color.red : color.yellow, text_size=tblSize)
+        table.cell(infoPanel, 2, currentRow, "", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 3, currentRow, "", text_color=color.white, text_size=tblSize)
+        currentRow += 1
+        
+        // Implied Move
+        string impliedMoveStr = "± " + str.tostring(impliedMoveBS, "#.0") + " (" + str.tostring(impliedMoveBS / close * 100, "#.1") + "%)"
+        table.cell(infoPanel, 0, currentRow, "Implied Move:", text_color=color.yellow, text_size=tblSize)
+        table.merge_cells(infoPanel, 1, currentRow, 3, currentRow)
+        table.cell(infoPanel, 1, currentRow, impliedMoveStr, text_color=color.white, text_size=tblSize)
+        currentRow += 1
+        
+        // ==================== FLOW DYNAMICS SECTION ====================
+        // Header
+        table.cell(infoPanel, 0, currentRow, "FLOW DYNAMICS", 
+                  text_color=color.white, text_size=tblSize, 
+                  bgcolor=color.new(color.orange, 70))
+        table.merge_cells(infoPanel, 0, currentRow, 3, currentRow)
+        currentRow += 1
+        
+        // Volume momentum
+        string momArrow = directionDeltaPercentage > 30 ? "▲" : directionDeltaPercentage < -30 ? "▼" : "→"
+        color momCol = directionDeltaPercentage > 30 ? color.green : directionDeltaPercentage < -30 ? color.red : color.yellow
+        string momText = momArrow + " " + str.tostring(math.abs(directionDeltaPercentage), "#.0") + "%"
+        
+        table.cell(infoPanel, 0, currentRow, "Vol ΔMom:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 1, currentRow, momText, text_color=momCol, text_size=tblSize)
+        
+        // Hedging momentum
+        float hdgMomScore = (globalHedgeRatio - prevHedgingRatio) * 100
+        string momHdgArrow = hdgMomScore > 30 ? "▲" : hdgMomScore < -30 ? "▼" : "→"
+        color momHdgCol = hdgMomScore > 30 ? color.green : hdgMomScore < -30 ? color.red : color.yellow
+        string momHdgText = momHdgArrow + " " + str.tostring(math.abs(hdgMomScore), "#.0") + "%"
+        
+        table.cell(infoPanel, 2, currentRow, "Hdg ΔMom:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, 3, currentRow, momHdgText, text_color=momHdgCol, text_size=tblSize)
+        currentRow += 1
+        
+        // Net bias delta
+        float biasDiff = math.abs(globalPrimaryRatio - globalHedgeRatio)
+        float biasDiffDelta = biasDiff - prevBiasDiff
+        string deltaStr = biasDiffDelta > 0 ? "▲" + str.tostring(biasDiffDelta, "#.0") + "%" :
+                         biasDiffDelta < 0 ? "▼" + str.tostring(math.abs(biasDiffDelta), "#.0") + "%" : "→0%"
+        color deltaColor = biasDiffDelta > 0 ? color.green : biasDiffDelta < 0 ? color.red : color.gray
+        
+        table.cell(infoPanel, 0, currentRow, "Net ΔBias:", text_color=color.white, text_size=tblSize)
+        table.merge_cells(infoPanel, 1, currentRow, 3, currentRow)
+        table.cell(infoPanel, 1, currentRow, deltaStr, text_color=deltaColor, text_size=tblSize)
+
+// ==================== HORIZONTAL INFO PANEL FUNCTION ====================
+
+// Horizontal Info Panel - 4-section side-by-side layout using 16 columns
+updateHorizontalInfoPanel() =>
+    if showInfoPanel and barstate.islast and listReady
+        // Calculate dynamic section column allocations
+        [priceCols, sentimentCols, analyticsCols, flowCols] = calculateSectionColumns(horizontalTableWidth)
+        [priceStart, sentimentStart, analyticsStart, flowStart] = calculateSectionStarts(priceCols, sentimentCols, analyticsCols, flowCols)
+        
+        // Clear the table - using dynamic dimensions
+        table.clear(infoPanel, 0, 0, horizontalTableWidth - 1, horizontalTableHeight - 1)
+        
+        // ==================== SECTION 1: PRICE LEVELS ====================
+        table.merge_cells(infoPanel, priceStart, 0, priceStart + priceCols - 1, 0)
+        table.cell(infoPanel, priceStart, 0, "📊 PRICE LEVELS", 
+                  bgcolor=color.new(color.blue, 70), text_color=color.white, text_size=tblSize)
+        
+        // POC Level (row 1)
+        if not na(pocLevel)
+            table.cell(infoPanel, priceStart, 1, "POC:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 1, 1, str.tostring(pocLevel, "#.00"), text_color=pocColor, text_size=tblSize)
+            pocDist = math.abs(close - pocLevel) / close * 100
+            string pocDistStr = str.tostring(pocDist, "#.1") + "%"
+            table.cell(infoPanel, priceStart + 2, 1, pocDistStr, text_color=pocDist < 1 ? color.green : pocDist < 3 ? color.yellow : color.red, text_size=tblSize)
+        
+        // VAH Level (row 2)
+        if not na(vahLevel)
+            table.cell(infoPanel, priceStart, 2, "VAH:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 1, 2, str.tostring(vahLevel, "#.00"), text_color=vahColor, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 2, 2, "Upper:", text_color=color.gray, text_size=tblSize)
+        
+        // VAL Level (row 3)  
+        if not na(valLevel)
+            table.cell(infoPanel, priceStart, 3, "VAL:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 1, 3, str.tostring(valLevel, "#.00"), text_color=valColor, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 2, 3, "Lower:", text_color=color.gray, text_size=tblSize)
+        
+        // Upper/Lower 20k levels (row 4)
+        if not na(secondaryVahLevel) and not na(secondaryValLevel)
+            table.cell(infoPanel, priceStart, 4, "20k:", text_color=color.white, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 1, 4, str.tostring(secondaryVahLevel, "#.00"), text_color=color.gray, text_size=tblSize)
+            table.cell(infoPanel, priceStart + 2, 4, str.tostring(secondaryValLevel, "#.00"), text_color=color.gray, text_size=tblSize)
+        
+        // ==================== SECTION 2: MARKET SENTIMENT (NARRATIVE DASHBOARD) ====================
+        table.merge_cells(infoPanel, sentimentStart, 0, sentimentStart + sentimentCols - 1, 0)
+        table.cell(infoPanel, sentimentStart, 0, "🎯 MARKET SENTIMENT", 
+                  bgcolor=color.new(color.green, 70), text_color=color.white, text_size=tblSize)
+        
+        // UNIFIED APPROACH: Use percentage-based display with narrative enhancements
+        float dirPct = globalPrimaryRatio * 100
+        string dirArrow = primarySentiment == "Bullish" ? "↑" : primarySentiment == "Bearish" ? "↓" : "→"
+        color dirColor = dirPct > 0 ? color.green : dirPct < 0 ? color.red : color.yellow
+        
+        float hdgPct = globalHedgeRatio * 100
+        string hdgArrow = hedgingSentiment == "Bullish Hedging" ? "↑" : hedgingSentiment == "Bearish Hedging" ? "↓" : "→"
+        color hdgColor = hdgPct > netBiasThreshold*100 ? color.green : hdgPct < -netBiasThreshold*100 ? color.red : color.yellow
+        
+        float dirDelta = directionDeltaPercentage
+        float hdgDelta = (globalHedgeRatio - prevHedgingRatio) * 100
+        float netDelta = biasDiffDelta
+        
+        // Generate signal text based on percentages
+        string dirSignalText = dirPct > 0 ? "Bullish" : dirPct < 0 ? "Bearish" : "Neutral"
+        string hdgSignalText = hdgPct > 0 ? "Bullish Hedging" : hdgPct < 0 ? "Bearish Hedging" : "Neutral Hedging"
+        
+        // Row 1: Directional Sentiment with percentage + arrow + delta
+        table.cell(infoPanel, sentimentStart, 1, "Directional:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 1, 1, str.tostring(dirPct, "#.0") + "% " + dirArrow, text_color=dirColor, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 2, 1, "Δ:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 3, 1, "→" + str.tostring(dirDelta, "#.0"), text_color=color.gray, text_size=tblSize)
+        
+        // Row 2: Directional Signal (descriptive text)
+        table.cell(infoPanel, sentimentStart, 2, "Signal:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 1, 2, dirSignalText, text_color=dirColor, text_size=tblSize)
+        
+        // Row 3: Hedging Sentiment with percentage + arrow + delta
+        table.cell(infoPanel, sentimentStart, 3, "Hedging:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 1, 3, str.tostring(hdgPct, "#.0") + "% " + hdgArrow, text_color=hdgColor, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 2, 3, "Δ:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 3, 3, "→" + str.tostring(hdgDelta, "#.0") + "%", text_color=color.gray, text_size=tblSize)
+        
+        // Row 4: Hedging Signal (descriptive text)
+        table.cell(infoPanel, sentimentStart, 4, "Signal:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 1, 4, hdgSignalText, text_color=hdgColor, text_size=tblSize)
+        
+        // Row 5: Unified Consensus calculation with strength meters
+        string biasLabel = ""
+        string strengthMeter = ""
+        color biasColor = color.white
+        
+        if dirPct > 0 and hdgPct > 0
+            float consensus = math.sqrt(dirPct * hdgPct)
+            int blockCount = math.round(math.min(consensus / 20, 5))
+            for i = 1 to 5
+                strengthMeter := strengthMeter + (i <= blockCount ? "■" : "□")
+            biasLabel := "Bullish Consensus"
+            biasColor := consensus > 50 ? color.rgb(0, 150, 0) : color.rgb(100, 200, 100)
+        else if dirPct < 0 and hdgPct < 0
+            float consensus = math.sqrt(math.abs(dirPct * hdgPct))
+            int blockCount = math.round(math.min(consensus / 20, 5))
+            for i = 1 to 5
+                strengthMeter := strengthMeter + (i <= blockCount ? "■" : "□")
+            biasLabel := "Bearish Consensus"
+            biasColor := consensus > 50 ? color.rgb(180, 0, 0) : color.rgb(220, 100, 100)
+        else
+            float netPct = dirPct + hdgPct
+            biasLabel := "Mixed Signals"
+            biasColor := netPct > 30 ? color.green : netPct < -30 ? color.red : color.yellow
+            strengthMeter := "◊◊◊◊◊"
+        
+        table.cell(infoPanel, sentimentStart, 5, "Consensus:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 1, 5, biasLabel + " " + strengthMeter, text_color=biasColor, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 2, 5, "Δ:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 3, 5, "→" + str.tostring(netDelta, "#.0") + "%", text_color=color.gray, text_size=tblSize)
+        
+        // Row 6: Confidence
+        string confidenceText = str.tostring(math.round(calculatedConfidence)) + "%"
+        string confIndicator = calculatedConfidence > 70 ? "✓" : calculatedConfidence > 50 ? "~" : "✗"
+        color confColor = calculatedConfidence > 70 ? color.green : calculatedConfidence > 50 ? color.yellow : color.red
+        
+        table.cell(infoPanel, sentimentStart, 6, "Confidence:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 1, 6, confidenceText, text_color=confColor, text_size=tblSize)
+        table.cell(infoPanel, sentimentStart + 2, 6, confIndicator, text_color=confColor, text_size=tblSize)
+        
+        // ==================== SECTION 3: OPTIONS ANALYTICS ====================
+        table.merge_cells(infoPanel, analyticsStart, 0, analyticsStart + analyticsCols - 1, 0)
+        table.cell(infoPanel, analyticsStart, 0, "🔍 OPTIONS ANALYTICS", 
+                  bgcolor=color.new(color.purple, 70), text_color=color.white, text_size=tblSize)
+        
+        // Row 1: VW-DIM and Skew
+        table.cell(infoPanel, analyticsStart, 1, "VW-DIM:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, analyticsStart + 1, 1, str.tostring(math.abs(globalCallSkew), "#.##"), text_color=globalSkewColor, text_size=tblSize)
+        table.cell(infoPanel, analyticsStart + 2, 1, "Skew:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, analyticsStart + 3, 1, globalSkewText, text_color=globalSkewColor, text_size=tblSize)
+        
+        // Row 2: IV Skew
+        table.cell(infoPanel, analyticsStart, 2, "IV Skew:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, analyticsStart + 1, 2, na(impliedVolSkew) ? "n/a" : str.tostring(impliedVolSkew, "#.##") + "%", 
+                  text_color=impliedVolSkew > 0 ? color.green : impliedVolSkew < 0 ? color.red : color.yellow, text_size=tblSize)
+        
+        // Row 3: Implied Move
+        string impliedMoveStr = "± " + str.tostring(impliedMoveBS, "#.0") + " (" + str.tostring(impliedMoveBS / close * 100, "#.1") + "%)"
+        table.cell(infoPanel, analyticsStart, 3, "Implied Move:", text_color=color.yellow, text_size=tblSize)
+        table.merge_cells(infoPanel, analyticsStart + 1, 3, analyticsStart + analyticsCols - 1, 3)
+        table.cell(infoPanel, analyticsStart + 1, 3, impliedMoveStr, text_color=color.white, text_size=tblSize)
+        
+        // ==================== SECTION 4: FLOW DYNAMICS ====================
+        table.merge_cells(infoPanel, flowStart, 0, flowStart + flowCols - 1, 0)
+        table.cell(infoPanel, flowStart, 0, "📈 FLOW DYNAMICS", 
+                  bgcolor=color.new(color.orange, 70), text_color=color.white, text_size=tblSize)
+        
+        // Row 1: Trend analysis
+        table.cell(infoPanel, flowStart, 1, "Trend:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, flowStart + 1, 1, "→ Initial", text_color=color.gray, text_size=tblSize)
+        table.cell(infoPanel, flowStart + 2, 1, "🔴", text_color=color.red, text_size=tblSize)
+        
+        // Row 2: Confidence  
+        table.cell(infoPanel, flowStart, 2, "Confidence:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, flowStart + 1, 2, confidenceText, text_color=confColor, text_size=tblSize)
+        table.cell(infoPanel, flowStart + 2, 2, confIndicator, text_color=confColor, text_size=tblSize)
+        
+        // Row 3: Volume momentum
+        string momArrow = directionDeltaPercentage > 30 ? "▲" : directionDeltaPercentage < -30 ? "▼" : "→"
+        color momCol = directionDeltaPercentage > 30 ? color.green : directionDeltaPercentage < -30 ? color.red : color.yellow
+        
+        table.cell(infoPanel, flowStart, 3, "Vol ΔMom:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, flowStart + 1, 3, momArrow + " " + str.tostring(math.abs(directionDeltaPercentage), "#.0") + "%", text_color=momCol, text_size=tblSize)
+        
+        // Row 4: Hedging momentum
+        float hdgMomScore = (globalHedgeRatio - prevHedgingRatio) * 100
+        string momHdgArrow = hdgMomScore > 30 ? "▲" : hdgMomScore < -30 ? "▼" : "→"
+        color momHdgCol = hdgMomScore > 30 ? color.green : hdgMomScore < -30 ? color.red : color.yellow
+        string momHdgText = momHdgArrow + " " + str.tostring(math.abs(hdgMomScore), "#.0") + "%"
+        
+        table.cell(infoPanel, flowStart, 4, "Hdg ΔMom:", text_color=color.white, text_size=tblSize)
+        table.cell(infoPanel, flowStart + 1, 4, momHdgText, text_color=momHdgCol, text_size=tblSize)
+
+// ==================== MATHEMATICAL FUNCTIONS ====================
+
+// ── BS Helper Functions ────────────────────────────────────────────────
+// 1) d1, d2
+f_d1(S,K,r,q,o,T) =>
+    (math.log(S/K) + (r - q + 0.5 * o * o) * T) / (o * math.sqrt(T))
+f_d2(d1,o,T) =>
+    d1 - o * math.sqrt(T)
+
+// ── Approximate error function ─────────────────────────────
+f_erf(x) =>
+    // constants
+    a1 = 0.254829592
+    a2 = -0.284496736
+    a3 = 1.421413741
+    a4 = -1.453152027
+    a5 = 1.061405429
+    p  = 0.3275911
+    sign = x < 0 ? -1 : 1
+    absx = math.abs(x)
+    t = 1.0 / (1.0 + p * absx)
+    y = 1.0 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * math.exp(-absx * absx)
+    sign * y
+
+// ── Standard normal CDF using erf(x/√2) ────────────────────
+f_N(x) =>
+    0.5 * (1.0 + f_erf(x * 0.7071067811865476))  // 1/√2 ≈ 0.70710678
+
+
+
+
+// 3) Call and Put prices
+f_bsCall(S,K,r,q,o,T) =>
+    d1 = f_d1(S,K,r,q,o,T)
+    d2 = f_d2(d1,o,T)
+    S * math.exp(-q * T) * f_N(d1) - K * math.exp(-r * T) * f_N(d2)
+
+f_bsPut(S,K,r,q,o,T) =>
+    c = f_bsCall(S,K,r,q,o,T)
+    c - S * math.exp(-q * T) + K * math.exp(-r * T)
+
+// 4) ATM straddle = call+put
+f_bsStraddle(S,K,r,q,o,T) =>
+    f_bsCall(S,K,r,q,o,T) + f_bsPut(S,K,r,q,o,T)
+
+// ── Implied Volatility by Bisection ────────────────────────────────────
+f_ivBisection(targetPrice, S,K,r,q,T) =>
+    low  = 1e-6
+    high = 5.0
+    mid  = 0.0
+    for i = 0 to 20
+        mid := (low + high) / 2
+        p   = f_bsStraddle(S,K,r,q,mid,T)
+        if p > targetPrice
+            high := mid
+        else
+            low := mid
+    mid
+
+// ==================== DATA PROCESSING FUNCTIONS ====================
+
+f_swap(_arr, idxA, idxB) =>
+    tmp = array.get(_arr, idxA)
+    array.set(_arr, idxA, array.get(_arr, idxB))
+    array.set(_arr, idxB, tmp)
+
+// ──────── HELPERS ────────────────────────────────────────
+// MODIFIED: Updated to handle decimal strikes properly and SPX special rounding
+roundToNearest(v, nearest) =>
+    // Multiply by 10 to handle decimals properly, then divide by 10
+    multiplier = 10.0
+    // Round to nearest value based on baseStrikePattern and nearest
+    baseStrike = math.round(v / baseStrikePattern) * baseStrikePattern
+    // Then round to nearest increment specified (e.g., 0.5, 2.5)
+    result = math.round(baseStrike / nearest) * nearest
+    // Ensure we handle the decimal precision correctly
+    math.round(result * multiplier) / multiplier
+
+// UPDATED: Modified to handle SPX/SPXW options format correctly
+getOptionSymbol(_under, _yr, _mo, _dy, _side, _strike) =>
+    // Special handling for SPX/SPXW
+    base = _under
+
+    // Handle SPX specially - create a local variable for adjusted strike price
+    adjusted_strike = effectiveIsSpx ? math.round(_strike / spxRounding) * spxRounding : _strike
+
+    yy = str.format("{0,number,00}", _yr % 100)
+    mm = str.format("{0,number,00}", _mo)
+    dd = str.format("{0,number,00}", _dy)
+
+    // Different handling based on whether we're dealing with SPX/SPXW
+    if effectiveIsSpx
+        // For SPX, use simpler format with # formatter and .0 suffix
+        strikeStr = str.tostring(adjusted_strike, "#") + ".0"
+        base + yy + mm + dd + _side + strikeStr
+    else
+        // Original formatting for other symbols
+        strikeStr = str.tostring(adjusted_strike)
+        // For regular options (like SPY)
+        strikeInt = math.round(adjusted_strike * 1000)
+        raw = str.tostring(strikeInt)
+        padCount = math.max(0, 8 - str.length(raw))
+        strikePad = padCount > 0 ? str.repeat("0", padCount) + raw : raw
+
+        // Check if the strike is a whole number
+        isWholeNumber = adjusted_strike == math.floor(adjusted_strike)
+        // Add ".0" only for whole numbers, otherwise use as is
+        strikeS = isWholeNumber ? strikeStr + ".0" : strikeStr
+
+        base + yy + mm + dd + _side + strikeS
+
+// ===== 8. VISUAL CONFIDENCE INDICATOR =====
+// Create visual indicator for confidence level
+getConfidenceIndicator(float confidence) =>
+    // Unicode characters for a small bar chart representation
+    string indicator = ""
+    int bars = math.round(confidence / 10)
+    
+    // Add filled blocks for confidence level
+    for i = 1 to bars
+        indicator := indicator + "■"
+    
+    // Add empty blocks for remaining space
+    for i = bars + 1 to 10
+        indicator := indicator + "□"
+    
+    // Determine color based on confidence
+    color indicatorColor = confidence >= 80 ? color.new(color.green, 0) : 
+                           confidence >= 60 ? color.new(color.green, 30) :
+                           confidence >= 50 ? color.new(color.yellow, 0) : 
+                           confidence >= 30 ? color.new(color.orange, 0) :
+                           color.new(color.red, 0)
+    
+    [indicator, indicatorColor]
+
+
+getTextColor() =>
+    useWhiteBackground ? color.black : color.white
+
+
+// Detect SPX and if we're NOT on 5-min chart
+//isSPX = syminfo.ticker == "SPX" or syminfo.ticker == "SPXW"
+
+
+
+
+
+
+
+
+
+
+
+// Create or update warning
+if effectiveIsSpx and not is5MinTimeframe
+    if na(warningLabel)
+        warningLabel := createCollisionAwareLabel(x=bar_index,y=high,labelText="⚠️ Switch to 5-minute timeframe for SPX ⚠️",labelType=LEVEL_TYPE_WARNING,style=label.style_label_down,textcolor=color.red,labelColor=color.new(color.red, 90),size=txtSize)
+    else
+        // Update position as chart progresses
+        label.set_xy(warningLabel, bar_index, high)
+        label.set_text(warningLabel, "⚠️ Switch to 5-minute timeframe for SPX ⚠️")
+else
+    // Remove the warning if not needed anymore
+    if not na(warningLabel)
+        label.delete(warningLabel)
+        warningLabel := na
+
+    
+    // Also add a background warning
+   
+// helper to delete & clear a label-array
+f_clearLabelArray(labelArr) =>
+    while array.size(labelArr) > 0
+        label.delete(array.pop(labelArr))   // pop removes & returns last handle
+    array.clear(labelArr)
+
+// Helper to clear box arrays
+f_clearBoxArray(boxArr) =>
+    while array.size(boxArr) > 0
+        box.delete(array.pop(boxArr))
+    array.clear(boxArr)
+
+// Helper to clear line arrays
+f_clearLineArray(lineArr) =>
+    while array.size(lineArr) > 0
+        line.delete(array.pop(lineArr))
+    array.clear(lineArr)
+
+f_format_number_with_commas(n) =>
+    s = str.tostring(math.round(n))
+    result = ""
+    for i = 0 to str.length(s) - 1
+        ch = str.substring(s, i, i + 1)
+        pos_from_right = str.length(s) - i
+        result := result + ch
+        if pos_from_right > 1 and pos_from_right % 3 == 1
+            result := result + ","
+    result
+
+// For ΔΔVol formatting - special case for small numbers
+// For ΔΔVol formatting - show decimals in thousands
+formatDeltaChange(float value) =>
+    absValue = math.abs(value)
+    if na(value)
+        "--"
+    else if absValue >= 1000
+        // Show one decimal place for thousands (e.g., 1.3k, 12.5k)
+        kValue = value / 1000
+        str.tostring(kValue, "#.#") + "k"
+    else if absValue >= 100
+        // For 100-999, show whole number
+        str.tostring(math.round(value))
+    else
+        // For small numbers, show whole number with sign
+        str.tostring(math.round(value))
+
+
+format_delta_with_arrow(float value) =>
+    if na(value) or value == 0
+        "0"
+    else if value > 0
+        "▲ " + str.tostring(math.abs(value), "#.##")
+    else
+        "▼ " + str.tostring(math.abs(value), "#.##")
+
+// Function to get top N unique non-zero values from a float array
+getTopNUniqueValues(float[] arr, int n) =>
+    float[] uniqueSorted = array.new_float()
+    // Create a copy and sort descending
+    float[] sortedCopy = array.copy(arr)
+    array.sort(sortedCopy, order.descending)
+
+    // Find unique non-zero values
+    for val in sortedCopy
+        if val > 0 and array.indexof(uniqueSorted, val) == -1
+            array.push(uniqueSorted, val)
+            if array.size(uniqueSorted) >= n
+                break
+
+    // Fill remaining slots with na if fewer than N unique values found
+    while array.size(uniqueSorted) < n
+        array.push(uniqueSorted, na)
+
+    uniqueSorted // Returns an array of size N with top unique values or na
+
+// [NEW] Calculate Call-Put Ratio
+calcCallPutRatio(float callVol, float putVol) =>
+    result = 0.0
+    if putVol > 0
+        result := callVol / putVol
+    result
+
+// [NEW] Calculate Volume Delta
+calcVolumeDelta(float callVol, float putVol) =>
+    callVol - putVol
+
+// [NEW] Calculate Price Change
+calcPriceChange(float currentPrice, float prevPrice) =>
+    if na(prevPrice) or prevPrice == 0.0
+        0.0
+    else
+        if usePriceChangePercent
+            (currentPrice - prevPrice) / prevPrice * 100.0
+        else
+            currentPrice - prevPrice
+
+// [NEW] Function to determine color based on price change            
+getPriceChangeColor(float change) =>
+    absChange = math.abs(change)
+    if absChange >= priceChangeHighlightThreshold
+        change > 0 ? color.new(color.green, 20) : color.new(color.red, 20)
+    else
+        na
+
+// [NEW] Function to determine color based on volume delta change
+getVolDeltaChangeColor(float change) =>
+    absChange = math.abs(change)
+    if absChange >= volDeltaChangeHighlightThreshold
+        change > 0 ? color.new(color.green, 20) : color.new(color.red, 20)
+    else
+        na
+
+// ==================== CORE LOGIC FUNCTIONS ====================
+
+// ──────── BUILD NEW STRIKE LIST AT 09:30 ET ─────────────
+f_buildStrikes(_anchor) =>
+    array.clear(callSyms), array.clear(putSyms)
+    array.clear(callVols), array.clear(putVols)
+    array.clear(strikePrices)
+    array.clear(totalVols)
+    array.clear(callPrices)
+    array.clear(putPrices)
+    // [NEW] Clear ratio and delta arrays
+    array.clear(callPutRatios)
+    array.clear(volumeDeltas)
+    
+    // [NEW] Clear the previous price and changes arrays
+    array.clear(prevCallPrices)
+    array.clear(prevPutPrices)
+    array.clear(callPriceChanges)
+    array.clear(putPriceChanges)
+    array.clear(prevVolumeDeltas)
+    array.clear(volumeDeltaChanges)
+    
+    // [NEW] Clear 5-period history arrays
+    array.clear(deltaChangeHistory)
+    array.clear(volumeDeltaChanges5)
+    // [NEW] Clear confirmed and history arrays
+    array.clear(confirmedVolumeDeltas)
+    array.clear(confirmedDeltaChanges)
+    array.clear(displayDeltaChanges)
+    array.clear(displayDeltaChanges5)
+    array.clear(deltaChangeHistory)
+    array.clear(volumeDeltaChanges5)
+
+    // clear any existing handles
+    f_clearLabelArray(strikeLbls)
+    f_clearBoxArray(callBoxes)
+    f_clearBoxArray(putBoxes)
+    f_clearLabelArray(lineLbls)
+    // [NEW] Clear distance arrow labels and volume delta lines
+    f_clearLabelArray(distanceArrowLabels)
+    f_clearLineArray(volumeDeltaLines)
+
+    // Delete old lines if they exist
+    line.delete(pocLine)
+    line.delete(vahLine)
+    line.delete(valLine)
+    line.delete(secondaryVahLine)
+    line.delete(secondaryValLine)
+    box.delete(valueAreaCloud)
+    box.delete(secondaryValueAreaCloud)
+
+    // centre strike - use effectiveRoundStrike
+    strikeVal = roundToNearest(_anchor, effectiveRoundStrike)
+    array.push(strikePrices, strikeVal)
+    array.push(callSyms, getOptionSymbol(tickerSymbol, effectiveYear, effectiveMonth, effectiveDay, "C", strikeVal))
+    array.push(putSyms, getOptionSymbol(tickerSymbol, effectiveYear, effectiveMonth, effectiveDay, "P", strikeVal))
+    array.push(callVols , 0.0)
+    array.push(putVols  , 0.0)
+    array.push(totalVols, 0.0)
+    array.push(callPrices, 0.0)
+    array.push(putPrices, 0.0)
+    
+    // [NEW] Initialize previous and change arrays
+    array.push(prevCallPrices, 0.0)
+    array.push(prevPutPrices, 0.0)
+    array.push(callPriceChanges, 0.0)
+    array.push(putPriceChanges, 0.0)
+    
+    // [NEW] Initialize ratio and delta arrays
+    array.push(callPutRatios, 0.0)
+    array.push(volumeDeltas, 0.0)
+    array.push(prevVolumeDeltas, 0.0)
+    array.push(volumeDeltaChanges, 0.0)
+    
+    // [NEW] Initialize confirmed value arrays
+    array.push(confirmedVolumeDeltas, 0.0)
+    array.push(confirmedDeltaChanges, 0.0)
+    array.push(displayDeltaChanges, 0.0)
+    array.push(displayDeltaChanges5, 0.0)
+
+    // [NEW] Initialize 5-period history (4 slots per strike for confirmed values)
+    for h = 0 to 3
+        array.push(deltaChangeHistory, 0.0)
+    array.push(volumeDeltaChanges5, 0.0)
+
+    // Use effectiveSpacing for strike increments
+    actualSpacing = effectiveSpacing
+
+    // below-ATM strikes
+    for i = 1 to numStrikesBelow
+        s = strikeVal - i * actualSpacing
+        // Ensure we round to maintain consistent decimal precision
+        s := math.round(s * 10) / 10
+        array.push(strikePrices, s)
+        array.push(callSyms, getOptionSymbol(tickerSymbol, effectiveYear, effectiveMonth, effectiveDay, "C", s))
+        array.push(putSyms, getOptionSymbol(tickerSymbol, effectiveYear, effectiveMonth, effectiveDay, "P", s))
+        array.push(callVols , 0.0)
+        array.push(putVols  , 0.0)
+        array.push(totalVols, 0.0)
+        array.push(callPrices, 0.0)
+        array.push(putPrices, 0.0)
+        
+        // [NEW] Initialize previous and change arrays
+        array.push(prevCallPrices, 0.0)
+        array.push(prevPutPrices, 0.0)
+        array.push(callPriceChanges, 0.0)
+        array.push(putPriceChanges, 0.0)
+        
+        // [NEW] Initialize ratio and delta arrays for this strike
+        array.push(callPutRatios, 0.0)
+        array.push(volumeDeltas, 0.0)
+        array.push(prevVolumeDeltas, 0.0)
+        array.push(volumeDeltaChanges, 0.0)
+        
+        // [NEW] Initialize confirmed value arrays
+        array.push(confirmedVolumeDeltas, 0.0)
+        array.push(confirmedDeltaChanges, 0.0)
+        array.push(displayDeltaChanges, 0.0)
+        array.push(displayDeltaChanges5, 0.0)
+
+        // [NEW] Initialize 5-period history (4 slots per strike for confirmed values)
+        for h = 0 to 3
+            array.push(deltaChangeHistory, 0.0)
+        array.push(volumeDeltaChanges5, 0.0)
+
+    // above-ATM strikes
+    for i = 1 to numStrikesAbove
+        s = strikeVal + i * actualSpacing
+        // Ensure we round to maintain consistent decimal precision
+        s := math.round(s * 10) / 10
+        array.push(strikePrices, s)
+        array.push(callSyms, getOptionSymbol(tickerSymbol, effectiveYear, effectiveMonth, effectiveDay, "C", s))
+        array.push(putSyms, getOptionSymbol(tickerSymbol, effectiveYear, effectiveMonth, effectiveDay, "P", s))
+        array.push(callVols , 0.0)
+        array.push(putVols  , 0.0)
+        array.push(totalVols, 0.0)
+        array.push(callPrices, 0.0)
+        array.push(putPrices, 0.0)
+        
+        // [NEW] Initialize previous and change arrays
+        array.push(prevCallPrices, 0.0)
+        array.push(prevPutPrices, 0.0)
+        array.push(callPriceChanges, 0.0)
+        array.push(putPriceChanges, 0.0)
+        
+        // [NEW] Initialize ratio and delta arrays for this strike
+        array.push(callPutRatios, 0.0)
+        array.push(volumeDeltas, 0.0)
+        array.push(prevVolumeDeltas, 0.0)
+        array.push(volumeDeltaChanges, 0.0)
+        
+        // [NEW] Initialize confirmed value arrays
+        array.push(confirmedVolumeDeltas, 0.0)
+        array.push(confirmedDeltaChanges, 0.0)
+        array.push(displayDeltaChanges, 0.0)
+        array.push(displayDeltaChanges5, 0.0)
+
+        // [NEW] Initialize 5-period history (4 slots per strike for confirmed values)
+        for h = 0 to 3
+            array.push(deltaChangeHistory, 0.0)
+        array.push(volumeDeltaChanges5, 0.0)
+
+// [NEW] Function to get the reference price
+getReferencePrice() =>
+    if useCustomReferenceStrike
+        customReferenceStrike
+    else
+        // Use reference mode dynamically
+        if autoReferenceMode == "POC" and not na(pocLevel)
+            pocLevel
+        else if autoReferenceMode == "VAH" and not na(vahLevel)
+            vahLevel
+        else if autoReferenceMode == "VAL" and not na(valLevel)
+            valLevel
+        else
+            close // Default to ATM
+
+// ──────── MAIN EXECUTION LOGIC ───────────────────────────────────────────────────────
+
+// ==================== INITIALIZATION & DATA PROCESSING ====================
+
+// ───── first-time initialisation ─────────────────────────────
+// Build the list on the first bar we ever execute (the "live" bar),
+// i.e. when barstate.islast is true *and* we haven't built it yet.
+if barstate.islastconfirmedhistory and not listReady
+    referencePrice := getReferencePrice()
+    anchorOpen := referencePrice                     // use reference price as anchor
+    f_buildStrikes(anchorOpen)
+    listReady  := true
+if barstate.isfirst
+    // build only if we loaded after 09:30 so the guard above won't run
+    if not listReady and (hour > 9 or (hour == 9 and minute >= 30))
+        referencePrice := getReferencePrice()
+        anchorOpen := referencePrice
+        f_buildStrikes(anchorOpen)
+        listReady  := true
+// ───── daily refresh at the official 09:30 open ─────────────
+// Update this section where the script refreshes at 9:30 open
+if isRthOpen and isToday and not (hour == 9 and minute == 30)    // guard for very first build
+    // Check if reference price has changed
+    referencePrice := getReferencePrice()
+    if referencePrice != anchorOpen
+        anchorOpen := referencePrice                 // Use reference price instead of open
+    openingBarIndex := bar_index                    // store the bar index of the opening bar
+    f_buildStrikes(anchorOpen)                      // overwrite yesterday's strikes
+    marketOpenPrice := open
+
+    // Calculate static implied move at market open (similar to your existing calculation)
+    float atmCallPrice = na
+    float atmPutPrice = na
+    
+    // Find the ATM prices at market open
+    for i = 0 to array.size(strikePrices)-1
+        if array.get(strikePrices, i) == roundToNearest(open, effectiveRoundStrike)
+            atmCallPrice := array.get(callPrices, i)
+            atmPutPrice := array.get(putPrices, i)
+            break
+    
+    // Calculate days to expiration
+    daysToExpiry = math.max(1, (effectiveYear - year) * 365 + (effectiveMonth - month) * 30 + (effectiveDay - dayofmonth))
+    float yearsToExpiry = daysToExpiry / 365.0
+    
+    // Calculate static implied move using Black-Scholes
+    float straddlePrice = atmCallPrice + atmPutPrice
+    float _riskFreeRate = riskFreeRate
+    float _dividendYield = dividendYield
+    
+    T = daysToExpiry / 365.0
+    S = open  // Use the opening price
+    
+    // Only calculate if straddle price is available
+    if not na(straddlePrice) and straddlePrice > 0
+        ivATM = f_ivBisection(straddlePrice, S, S, _riskFreeRate, _dividendYield, T)
+        staticImpliedMoveBS := S * ivATM * math.sqrt(T)
+
+// Update reference price on each bar
+if not(barstate.islast) // avoid repeating calculation
+    referencePrice := getReferencePrice()
+    // If reference changed significantly, rebuild strike grid
+    if math.abs(referencePrice - anchorOpen) > effectiveSpacing * 2 and listReady
+        anchorOpen := referencePrice
+        f_buildStrikes(anchorOpen)
+
+if hour == 9 and minute == 30
+    mostRecentOpenTimeBarIndex := bar_index
+
+
+// helper to convert our text‑size choice into Pine's size enum
+
+// ──────── UPDATE VOLUMES (single request each) ───────────
+if listReady
+    fullyLoadedCheck = true
+    for j = 0 to array.size(strikePrices)-1
+        for side = 0 to 1
+            sym = side == 0 ? array.get(callSyms,j) : array.get(putSyms,j)
+            // Get volume data
+            [vol, price] = request.security(sym, volTF, [volume, close], gaps = barmerge.gaps_off,lookahead = barmerge.lookahead_on,ignore_invalid_symbol = true)
+
+            // if vol is na, treat it as zero
+            safeVol = na(vol) ? 0.0 : vol
+            // Check if data is NA
+            if na(vol)
+                fullyLoadedCheck := false
+
+            if side == 0
+                // Store previous price values before updating
+                if barstate.islast and array.size(callPrices) > j
+                    prevPrice = array.get(callPrices, j)
+                    if prevPrice > 0  // Only save if it's a valid price
+                        array.set(prevCallPrices, j, prevPrice)
+                
+                // Update current values
+                array.set(callVols, j, safeVol)
+                array.set(callPrices, j, price)
+                
+                // Calculate price change
+                if barstate.islast and array.size(prevCallPrices) > j
+                    prevPrice = array.get(prevCallPrices, j)
+                    array.set(callPriceChanges, j, calcPriceChange(price, prevPrice))
+            else
+                // Store previous price values before updating
+                if barstate.islast and array.size(putPrices) > j
+                    prevPrice = array.get(putPrices, j)
+                    if prevPrice > 0  // Only save if it's a valid price
+                        array.set(prevPutPrices, j, prevPrice)
+                
+                // Update current values
+                array.set(putVols, j, safeVol)
+                array.set(putPrices, j, price)
+                
+                // Calculate price change
+                if barstate.islast and array.size(prevPutPrices) > j
+                    prevPrice = array.get(prevPutPrices, j)
+                    array.set(putPriceChanges, j, calcPriceChange(price, prevPrice))
+                
+                // [NEW] Store previous volume delta before updating
+                if barstate.islast and array.size(volumeDeltas) > j
+                    prevDelta = array.get(volumeDeltas, j)
+                    if not na(prevDelta)
+                        array.set(prevVolumeDeltas, j, prevDelta)
+
+                // [NEW] After setting both call and put volumes, update ratio and delta
+                // [NEW] After setting both call and put volumes, update ratio and delta
+                cv = array.get(callVols, j)
+                pv = array.get(putVols, j)
+
+                // Update call-put ratio
+                array.set(callPutRatios, j, calcCallPutRatio(cv, pv))
+
+                // Calculate current volume delta
+                currentDelta = calcVolumeDelta(cv, pv)
+                array.set(volumeDeltas, j, currentDelta)
+
+                // [NEW] Calculate ΔΔVol using CONFIRMED previous value (persists across bar changes)
+                // Calculate ΔΔVol using CONFIRMED previous value
+// [NEW] Calculate ΔΔVol using CONFIRMED previous value
+                if array.size(confirmedVolumeDeltas) > j
+                    confirmedDelta = array.get(confirmedVolumeDeltas, j)
+                    
+                    // --- FIX FOR TREND COLUMN RESETTING TO TOTAL VOL ---
+                    // If confirmedDelta is 0.0 (fresh grid reset) but currentDelta has volume,
+                    // calculating change normally results in Change == Total.
+                    // We temporarily treat confirmed as current to suppress the artificial "jump".
+                    float calcBase = confirmedDelta
+                    if confirmedDelta == 0.0 and math.abs(currentDelta) > 0
+                        calcBase := currentDelta
+                    
+                    currentChange = currentDelta - calcBase
+                    // ---------------------------------------------------
+                    
+                    array.set(volumeDeltaChanges, j, currentChange)
+
+                    // Update display value: show current change if non-zero, otherwise keep last displayed value
+                    if math.abs(currentChange) > 0.5 // Small threshold to avoid floating point issues
+                        array.set(displayDeltaChanges, j, currentChange)
+                    
+                    // If currentChange is ~0 (bar just reset), displayDeltaChanges keeps its previous value
+                    
+                    // Calculate 5-period sum
+                    if array.size(deltaChangeHistory) >= (j + 1) * 4
+                        historyBaseIndex = j * 4
+                        // Sum the 4 confirmed historical values
+                        historySum = 0.0
+                        for h = 0 to 3
+                            historySum += array.get(deltaChangeHistory, historyBaseIndex + h)
+                            
+                        // For display: add current change if significant, otherwise just show history sum
+                        if math.abs(currentChange) > 0.5
+                            array.set(volumeDeltaChanges5, j, historySum + currentChange)
+                            array.set(displayDeltaChanges5, j, historySum + currentChange)
+                        else
+                            // Bar just reset - keep showing last confirmed 5-period total
+                            // displayDeltaChanges5 retains its value from last update
+                            array.set(volumeDeltaChanges5, j, historySum)
+                    
+                    // Only update confirmed values and rotate history when bar CONFIRMS
+                    if barstate.isconfirmed
+                        array.set(confirmedVolumeDeltas, j, currentDelta)
+                        array.set(confirmedDeltaChanges, j, currentChange)
+                        
+                        // Update display values on confirmation
+                        array.set(displayDeltaChanges, j, currentChange)
+                        
+                        // Rotate history
+                        if array.size(deltaChangeHistory) >= (j + 1) * 4
+                            historyBaseIndex = j * 4
+                            for h = 0 to 2
+                                array.set(deltaChangeHistory, historyBaseIndex + h, array.get(deltaChangeHistory, historyBaseIndex + h + 1))
+                            array.set(deltaChangeHistory, historyBaseIndex + 3, currentChange)
+                            
+                            // Update 5-period display on confirmation
+                            newHistorySum = 0.0
+                            for h = 0 to 3
+                                newHistorySum += array.get(deltaChangeHistory, historyBaseIndex + h)
+                            array.set(displayDeltaChanges5, j, newHistorySum + currentChange)
+                    
+                    // [NEW] Only update confirmed values and rotate history when bar CONFIRMS
+                    if barstate.isconfirmed
+                        // Store current delta as the new confirmed baseline
+                        array.set(confirmedVolumeDeltas, j, currentDelta)
+                        
+                        // Store the confirmed change (for reference if needed)
+                        array.set(confirmedDeltaChanges, j, currentChange)
+                        
+                        // Rotate history: shift slots 1-3 to 0-2, add confirmed change to slot 3
+                        if array.size(deltaChangeHistory) >= (j + 1) * 4
+                            historyBaseIndex = j * 4
+                            
+                            // Shift: discard oldest (slot 0), move 1→0, 2→1, 3→2
+                            for h = 0 to 2
+                                array.set(deltaChangeHistory, historyBaseIndex + h, array.get(deltaChangeHistory, historyBaseIndex + h + 1))
+                            
+                            // Add confirmed change to newest slot (slot 3)
+                            array.set(deltaChangeHistory, historyBaseIndex + 3, currentChange)
+    dataFullyLoaded := fullyLoadedCheck
+
+    // Calculate total volumes and find POC, VAH, VAL
+    if barstate.islast
+        // Update totalVols array
+        for i = 0 to array.size(strikePrices)-1
+            totalVol = array.get(callVols, i) + array.get(putVols, i)
+            array.set(totalVols, i, totalVol)
+
+        // [NEW] Find top call and put strike prices
+        maxCallVol = array.max(callVols)
+        maxPutVol = array.max(putVols)
+        
+        // Find the strike with the max call volume
+        for i = 0 to array.size(callVols)-1
+            if array.get(callVols, i) == maxCallVol
+                topCallStrike := array.get(strikePrices, i)
+                break
+                
+        // Find the strike with the max put volume
+        for i = 0 to array.size(putVols)-1
+            if array.get(putVols, i) == maxPutVol
+                topPutStrike := array.get(strikePrices, i)
+                break
+
+        // Create sorted copy of strikes by volume for value area calculation
+        var strikeVolPairs = array.new_float(0)
+        array.clear(strikeVolPairs)
+
+        // Create pairs of [strike, volume] for sorting
+        for i = 0 to array.size(strikePrices)-1
+            array.push(strikeVolPairs, array.get(strikePrices, i))
+            array.push(strikeVolPairs, array.get(totalVols, i))
+
+        // Sort by volume (descending)
+        sortedPairs = array.copy(strikeVolPairs)
+        // Bubble sort pairs by volume (every second element)
+        for i = 0 to array.size(sortedPairs) / 2 - 1
+            for j = 0 to array.size(sortedPairs) / 2 - 2
+                if array.get(sortedPairs, j*2+1) < array.get(sortedPairs, (j+1)*2+1)
+                    // Swap volumes
+                    tempVol = array.get(sortedPairs, j*2+1)
+                    array.set(sortedPairs, j*2+1, array.get(sortedPairs, (j+1)*2+1))
+                    array.set(sortedPairs, (j+1)*2+1, tempVol)
+                    // Swap corresponding strikes
+                    tempStrike = array.get(sortedPairs, j*2)
+                    array.set(sortedPairs, j*2, array.get(sortedPairs, (j+1)*2))
+                    array.set(sortedPairs, (j+1)*2, tempStrike)
+
+        // Find POC (first pair after sorting)
+        pocLevel := array.get(sortedPairs, 0)
+
+        // Calculate total volume
+        totalVolume = 0.0
+        for i = 0 to array.size(totalVols)-1
+            totalVolume += array.get(totalVols, i)
+
+        // Calculate value area (top valueAreaPercent% of volume)
+        targetVolume = totalVolume * valueAreaPercent / 100
+        cumulativeVolume = 0.0
+        valueAreaStrikes = array.new_float(0)
+
+        // Add strikes to value area until we reach the target volume
+        for i = 0 to array.size(sortedPairs) / 2 - 1
+            strikeVol = array.get(sortedPairs, i*2+1)
+            strikePrice = array.get(sortedPairs, i*2)
+
+            cumulativeVolume += strikeVol
+            array.push(valueAreaStrikes, strikePrice)
+
+            if cumulativeVolume >= targetVolume
+                break
+
+        // Find VAH and VAL (highest and lowest strikes in value area)
+        if array.size(valueAreaStrikes) > 0
+            vahLevel := array.max(valueAreaStrikes)
+            valLevel := array.min(valueAreaStrikes)
+
+        // Find secondary VAH and VAL based on volume threshold
+        var float[] thresholdStrikes = array.new_float(0)
+        array.clear(thresholdStrikes)
+
+        // Find strikes where BOTH call and put volume >= volumeThreshold
+        for i = 0 to array.size(strikePrices)-1
+            cVol = array.get(callVols, i)
+            pVol = array.get(putVols, i)
+
+            if cVol >= volumeThreshold and pVol >= volumeThreshold
+                array.push(thresholdStrikes, array.get(strikePrices, i))
+
+        // Find highest and lowest strikes meeting threshold
+        if array.size(thresholdStrikes) > 0
+            secondaryVahLevel := array.max(thresholdStrikes)
+            secondaryValLevel := array.min(thresholdStrikes)
+        else
+            secondaryVahLevel := na
+            secondaryValLevel := na
+
+        dynamicImpliedMoveBS := impliedMoveBS  // This uses your existing impliedMoveBS calculation
+
+        // ==================== VISUALIZATION LOGIC ====================
+        
+        // Delete old lines if they exist
+        line.delete(staticUpperImpliedMoveLine)
+        line.delete(staticLowerImpliedMoveLine)
+        line.delete(dynamicUpperImpliedMoveLine)
+        line.delete(dynamicLowerImpliedMoveLine)
+        
+        // Delete old labels
+        label.delete(staticUpperImpliedMoveLabel)
+        label.delete(staticLowerImpliedMoveLabel)
+        label.delete(dynamicUpperImpliedMoveLabel)
+        label.delete(dynamicLowerImpliedMoveLabel)
+        label.delete(staticLegendLabel)
+        label.delete(dynamicLegendLabel)
+
+        // Draw the implied move lines if enabled
+        if showImpliedMoveLines
+            // Set line style
+            var lineStyleEnum = impliedMoveLineStyle == "solid" ? line.style_solid : impliedMoveLineStyle == "dashed" ? line.style_dashed : line.style_dotted
+            
+            // Calculate starting point for lines (similar to your other lines)
+            int lineStartX = na(mostRecentOpenTimeBarIndex) ? bar_index - labelOffset : mostRecentOpenTimeBarIndex
+
+            
+            
+            // Draw static implied move lines if we have valid data
+            if not na(staticImpliedMoveBS) and not na(marketOpenPrice)
+                float staticUpperLevel = marketOpenPrice + staticImpliedMoveBS
+                float staticLowerLevel = marketOpenPrice - staticImpliedMoveBS
+                
+                staticUpperImpliedMoveLine := line.new(  x1=lineStartX,    y1=staticUpperLevel, x2=bar_index + barOffset, y2=staticUpperLevel, color=staticImpliedMoveColor, width=impliedMoveLineWidth, style=lineStyleEnum)
+                    
+                staticLowerImpliedMoveLine := line.new(x1=lineStartX, y1=staticLowerLevel, x2=bar_index + barOffset, y2=staticLowerLevel, color=staticImpliedMoveColor, width=impliedMoveLineWidth, style=lineStyleEnum)
+                
+                // Add price labels if enabled with collision detection
+                if showImpliedMovePriceLabels
+                    staticUpperImpliedMoveLabel := createCollisionAwareLabel(x=bar_index + barOffset + 5, y=staticUpperLevel, labelText="Static IM+ " + str.tostring(staticUpperLevel, "#.00"), labelType=LEVEL_TYPE_IMPLIED_MOVE, labelColor=color.new(color.black, 100), textcolor=staticImpliedMoveColor, size=txtSize)
+                        
+                    staticLowerImpliedMoveLabel := createCollisionAwareLabel(x=bar_index + barOffset + 5, y=staticLowerLevel, labelText="Static IM- " + str.tostring(staticLowerLevel, "#.00"), labelType=LEVEL_TYPE_IMPLIED_MOVE, labelColor=color.new(color.black, 100), textcolor=staticImpliedMoveColor, size=txtSize)
+            
+            // Draw dynamic implied move lines if we have valid data
+            if not na(dynamicImpliedMoveBS)
+                float dynamicUpperLevel = close + dynamicImpliedMoveBS
+                float dynamicLowerLevel = close - dynamicImpliedMoveBS
+                
+                dynamicUpperImpliedMoveLine := line.new(x1=lineStartX, y1=dynamicUpperLevel, x2=bar_index + barOffset, y2=dynamicUpperLevel, color=dynamicImpliedMoveColor, width=impliedMoveLineWidth, style=lineStyleEnum)                    
+                dynamicLowerImpliedMoveLine := line.new(x1=lineStartX, y1=dynamicLowerLevel, x2=bar_index + barOffset, y2=dynamicLowerLevel, color=dynamicImpliedMoveColor, width=impliedMoveLineWidth, style=lineStyleEnum)
+                
+                // Add price labels if enabled with collision detection
+                if showImpliedMovePriceLabels
+                    dynamicUpperImpliedMoveLabel := createCollisionAwareLabel(x=bar_index + barOffset + 5, y=dynamicUpperLevel, labelText="Dynamic IM+ " + str.tostring(dynamicUpperLevel, "#.00"), labelType=LEVEL_TYPE_IMPLIED_MOVE, labelColor=color.new(color.black, 100), textcolor=dynamicImpliedMoveColor, size=txtSize)
+                        
+                    dynamicLowerImpliedMoveLabel := createCollisionAwareLabel(x=bar_index + barOffset + 5, y=dynamicLowerLevel, labelText="Dynamic IM- " + str.tostring(dynamicLowerLevel, "#.00"), labelType=LEVEL_TYPE_IMPLIED_MOVE, labelColor=color.new(color.black, 100), textcolor=dynamicImpliedMoveColor, size=txtSize)
+
+        // Delete old lines if they exist
+        line.delete(pocLine)
+        line.delete(vahLine)
+        line.delete(valLine)
+        line.delete(topPut)
+        line.delete(topCall)
+        line.delete(secondaryVahLine)
+        line.delete(secondaryValLine)
+        box.delete(valueAreaCloud)
+        box.delete(secondaryValueAreaCloud)
+        f_clearLabelArray(lineLbls)
+        f_clearLabelArray(distanceArrowLabels)
+
+        f_clearLineArray(volumeDeltaLines)
+
+        // Set line style
+        var lineStyleEnum = lineStyle == "solid" ? line.style_solid :
+                           lineStyle == "dashed" ? line.style_dashed :
+                           line.style_dotted
+
+        var secondaryLineStyleEnum = secondaryLineStyle == "solid" ? line.style_solid :
+                                   secondaryLineStyle == "dashed" ? line.style_dashed :
+                                   line.style_dotted
+
+        // Calculate starting point for lines (number of bars back)
+        // With this code that prefers the opening bar index when available:
+        int startBar = na(openingBarIndex) ? math.min(bar_index, barsBack) : bar_index - openingBarIndex
+        int lineStartX = na(mostRecentOpenTimeBarIndex) ? bar_index - labelOffset : mostRecentOpenTimeBarIndex
+
+        if showTopVolumeStrike
+            extend = extendToLeft ? extend.left : extend.none
+            // Draw horizontal lines at the top call and put strike levels
+            topPut := line.new(x1=lineStartX, y1=topPutStrike, x2=bar_index + barOffset, y2=topPutStrike, color=color.green, width=3, style=line.style_solid, extend=extend)
+            topCall := line.new(x1=lineStartX, y1=topCallStrike, x2=bar_index + barOffset, y2=topCallStrike, color=color.red, width=3, style=line.style_solid, extend=extend)
+            
+
+        // Draw new lines if enabled - align right end with volume profile
+        if showValueArea
+            extend = extendToLeft ? extend.left : extend.none
+            // Align right end of lines with the volume profile
+            // For POC, VAH, and VAL lines (replace the existing lines):
+            pocLine := line.new(x1=lineStartX, y1=pocLevel, x2=bar_index + barOffset, y2=pocLevel, color=pocColor, width=lineWidth, style=lineStyleEnum, extend=extend)
+            vahLine := line.new(x1=lineStartX, y1=vahLevel, x2=bar_index + barOffset, y2=vahLevel, color=vahColor, width=lineWidth, style=lineStyleEnum, extend=extend)
+            valLine := line.new(x1=lineStartX, y1=valLevel, x2=bar_index + barOffset, y2=valLevel, color=valColor, width=lineWidth, style=lineStyleEnum, extend=extend)
+
+
+            // Create value area cloud if enabled - aligned with volume profile
+            // For the value area cloud:
+            if showCloud and not na(vahLevel) and not na(valLevel)
+                extend = extendToLeft ? extend.left : extend.none
+                valueAreaCloud := box.new(left=lineStartX, top=vahLevel, right=bar_index + barOffset, bottom=valLevel, bgcolor=cloudColor, border_color=color.new(color.blue, 100), border_width=0, extend=extend)
+
+
+            // Add labels to lines if enabled
+            if showLineLabels
+
+                txtSize = f_getSize(labelTextSize)
+
+                bgColor = useWhiteBackground
+                textCol   = getTextColor()
+
+                // Left side labels
+                if labelPosition == "left"
+                    leftX = na(mostRecentOpenTimeBarIndex) ? bar_index - labelOffset : mostRecentOpenTimeBarIndex
+
+                    lblPOC = createCollisionAwareLabel(leftX, pocLevel, "POC: " + str.tostring(pocLevel),
+                                       LEVEL_TYPE_POC,
+                                       style=label.style_none,
+                                       labelColor=color.new(pocColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblPOC)
+
+                    lblVAH = createCollisionAwareLabel(leftX, vahLevel, "VAH: " + str.tostring(vahLevel),
+                                       LEVEL_TYPE_VAH,
+                                       style=label.style_none,
+                                       labelColor=color.new(vahColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblVAH)
+
+                    lblVAL = createCollisionAwareLabel(leftX, valLevel, "VAL: " + str.tostring(valLevel),
+                                       LEVEL_TYPE_VAL,
+                                       style=label.style_none,
+                                       labelColor=color.new(valColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblVAL)
+                    // Add labels for top call and put volume strikes
+
+
+                // Right side labels
+                if labelPosition == "right"
+                    rightX = bar_index
+
+                    lblPOC = createCollisionAwareLabel(rightX, pocLevel, "POC: " + str.tostring(pocLevel),LEVEL_TYPE_POC, style=label.style_none, labelColor=color.new(pocColor, 80), textcolor=textCol, size=txtSize)
+                    array.push(lineLbls, lblPOC)
+
+                    lblVAH = createCollisionAwareLabel(rightX, vahLevel, "VAH: " + str.tostring(vahLevel),
+                                       LEVEL_TYPE_VAH,
+                                       style=label.style_none,
+                                       labelColor=color.new(vahColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblVAH)
+
+                    lblVAL = createCollisionAwareLabel(rightX, valLevel, "VAL: " + str.tostring(valLevel),
+                                       LEVEL_TYPE_VAL,
+                                       style=label.style_none,
+                                       labelColor=color.new(valColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblVAL)
+                    // Add labels for top call and put volume strikes
+                
+
+                // Center labels
+                if labelPosition == "center"
+                    centerX = bar_index - labelOffset
+
+                    lblPOC = label.new(centerX, pocLevel, "POC: " + str.tostring(pocLevel),style=label.style_none, color=color.new(pocColor, 80), textcolor=textCol, size=txtSize)
+                    array.push(lineLbls, lblPOC)
+
+                    lblVAH = label.new(centerX, vahLevel, "VAH: " + str.tostring(vahLevel), style=label.style_none, color=color.new(vahColor, 80), textcolor=textCol, size=txtSize)
+                    array.push(lineLbls, lblVAH)
+
+                    lblVAL = label.new(centerX, valLevel, "VAL: " + str.tostring(valLevel), style=label.style_none, color=color.new(valColor, 80), textcolor=textCol, size=txtSize)
+                    array.push(lineLbls, lblVAL)
+
+                if showTopVolumeStrike and topStrikesLabelPosition == "left"
+                    leftX = na(mostRecentOpenTimeBarIndex) ? bar_index - labelOffset : mostRecentOpenTimeBarIndex
+                    lblTopCall = label.new(leftX + 7, topCallStrike, "#1 Call: " + str.tostring(topCallStrike),style=label.style_none,color=color.new(vahColor, 100),textcolor=color.red,size=txtSize)
+                    array.push(lineLbls, lblTopCall)
+
+                    lblTopPut = label.new(leftX + 7, topPutStrike, "#1 Put: " + str.tostring(topPutStrike),style=label.style_none,color=color.new(pocColor, 100),textcolor=color.green,size=txtSize)
+                    array.push(lineLbls, lblTopPut)
+
+                if showTopVolumeStrike and topStrikesLabelPosition == "right"
+                    rightX = bar_index
+                    lblTopCall = label.new(rightX + 7,  topCallStrike, "#1 Call: " + str.tostring(topCallStrike),style=label.style_none,color=color.new(vahColor, 100),textcolor=color.red,size=txtSize)
+                    array.push(lineLbls, lblTopCall)
+
+                    lblTopPut = label.new(rightX + 7, topPutStrike, "#1 Put: " + str.tostring(topPutStrike),style=label.style_none,color=color.new(pocColor, 100),textcolor=color.green,size=txtSize)
+                    array.push(lineLbls, lblTopPut)
+
+                            // Add labels for top call and put volume strikes
+                if showTopVolumeStrike and topStrikesLabelPosition == "center"
+                    centerX = bar_index - labelOffset
+                    lblTopCall = label.new(centerX + 7,  topCallStrike, "#1 Call: " + str.tostring(topCallStrike),style=label.style_none,color=color.new(vahColor, 100),textcolor=color.red,size=txtSize)
+                    array.push(lineLbls, lblTopCall)
+
+                    lblTopPut = label.new(centerX + 7, topPutStrike, "#1 Put: " + str.tostring(topPutStrike),style=label.style_none,color=color.new(pocColor, 100),textcolor=color.green,size=txtSize)
+                    array.push(lineLbls, lblTopPut)
+
+        // Draw secondary VAH/VAL lines if enabled
+        if showSecondaryLines and not(na(secondaryVahLevel)) and not(na(secondaryValLevel))
+            // Also for the secondary lines (BK upper and lower range):
+            extend = extendToLeft ? extend.left : extend.none
+            secondaryVahLine := line.new(x1=lineStartX, y1=secondaryVahLevel, x2=bar_index + barOffset, y2=secondaryVahLevel, color=secondaryVahColor, width=secondaryLineWidth, style=secondaryLineStyleEnum,  extend=extend)
+            secondaryValLine := line.new(x1=lineStartX, y1=secondaryValLevel, x2=bar_index + barOffset, y2=secondaryValLevel, color=secondaryValColor, width=secondaryLineWidth, style=secondaryLineStyleEnum,  extend=extend)
+            bgColor = useWhiteBackground
+            textCol   = getTextColor()
+
+            // Create secondary value area cloud if enabled
+            // For the secondary cloud:
+            if showSecondaryCloud
+                extend = extendToLeft ? extend.left : extend.none
+                secondaryValueAreaCloud := box.new(left=lineStartX, top=secondaryVahLevel, right=bar_index + barOffset, bottom=secondaryValLevel, bgcolor=secondaryCloudColor, border_color=color.new(color.purple, 100), border_width=0, extend=extend)
+            // Add labels to secondary lines if enabled
+            if showLineLabels
+                // Left side labels
+                if labelPosition == "left"
+                    leftX = na(mostRecentOpenTimeBarIndex) ? bar_index - labelOffset : mostRecentOpenTimeBarIndex
+
+
+                    lblSecVAH = label.new(leftX + 15, secondaryVahLevel, "BK Upper Range: " + str.tostring(secondaryVahLevel), style=label.style_none, color=color.new(secondaryVahColor, 80), textcolor=textCol, size=txtSize)
+                    array.push(lineLbls, lblSecVAH)
+
+                    lblSecVAL = label.new(leftX + 15, secondaryValLevel, "BK Lower Range: " + str.tostring(secondaryValLevel),
+                                       style=label.style_none,
+                                       color=color.new(secondaryValColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblSecVAL)
+
+                // Right side labels
+                if labelPosition == "right"
+                    rightX = bar_index
+
+
+                    lblSecVAH = label.new(rightX + 15, secondaryVahLevel, "BK Upper Range: " + str.tostring(secondaryVahLevel), style=label.style_none, color=color.new(secondaryVahColor, 80), textcolor=textCol, size=txtSize)
+                    array.push(lineLbls, lblSecVAH)
+
+                    lblSecVAL = label.new(rightX + 15, secondaryValLevel, "BK Lower Range: " + str.tostring(secondaryValLevel),
+                                       style=label.style_none,
+                                       color=color.new(secondaryValColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblSecVAL)
+
+                // Center labels
+                if labelPosition == "center"
+                    centerX = bar_index - labelOffset
+
+                    lblSecVAH = label.new(centerX + 15, secondaryVahLevel, "BK Upper Range: " + str.tostring(secondaryVahLevel),
+                                       style=label.style_none,
+                                       color=color.new(secondaryVahColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblSecVAH)
+
+                    lblSecVAL = label.new(centerX + 15, secondaryValLevel, "BK Lower Range: " + str.tostring(secondaryValLevel),
+                                       style=label.style_none,
+                                       color=color.new(secondaryValColor, 80),
+                                       textcolor=textCol,
+                                       size=txtSize)
+                    array.push(lineLbls, lblSecVAL)
+
+                     
+
+        // [NEW] Draw distance arrows to key strikes
+//
+//        if showDistanceArrows and barstate.islast
+//            if showTopCallStrikeArrow and not na(topCallStrike)
+//                // Calculate distance from current price to top call strike
+//                callDistance = math.abs(close - topCallStrike)
+//               callDistancePercent = (callDistance / close) * 100
+//               callArrowStyle = close < topCallStrike ? label.style_label_up : label.style_label_down
+//                callArrowText = "↑ " + str.tostring(callDistance, "#.00") + " (" + str.tostring(callDistancePercent, "#.00") + "%) to Top Call ↑"
+//                
+//                if close > topCallStrike
+//                    callArrowText := "↓ " + str.tostring(callDistance, "#.00") + " (" + str.tostring(callDistancePercent, "#.00") + "%) to Top Call ↓"
+                    
+//                callArrowY = close < topCallStrike ? close - (callDistance * 0.1) : close + (callDistance * 0.1)
+                
+//                callArrow = label.new(bar_index, callArrowY, callArrowText,style=callArrowStyle,color=distanceArrowColor,textcolor=color.white,size=arrowTxtSize)
+//                array.push(distanceArrowLabels, callArrow)
+                
+//            if showTopPutStrikeArrow and not na(topPutStrike)
+//               // Calculate distance from current price to top put strike
+//                putDistance = math.abs(close - topPutStrike)
+//                putDistancePercent = (putDistance / close) * 100
+//                putArrowStyle = close < topPutStrike ? label.style_label_up : label.style_label_down
+//                putArrowText = "↑ " + str.tostring(putDistance, "#.00") + " (" + str.tostring(putDistancePercent, "#.00") + "%) to Top Put ↑"
+                
+//                if close > topPutStrike
+//                    putArrowText := "↓ " + str.tostring(putDistance, "#.00") + " (" + str.tostring(putDistancePercent, "#.00") + "%) to Top Put ↓"
+                    
+//                putArrowY = close < topPutStrike ? close - (putDistance * 0.2) : close + (putDistance * 0.2)
+                
+//                putArrow = label.new(bar_index, putArrowY, putArrowText,style=putArrowStyle,color=distanceArrowColor,textcolor=color.white,size=arrowTxtSize)
+//                array.push(distanceArrowLabels, putArrow)
+
+
+            
+
+
+// ──────── DRAW VOLUME PROFILE (last bar only) ──────────
+if barstate.islast and listReady and showVolumeBars and dataFullyLoaded
+    f_clearLabelArray(strikeLbls)
+    f_clearBoxArray(callBoxes)
+    f_clearBoxArray(putBoxes)
+    f_clearLineArray(volumeDeltaLines)
+
+    // Create a new array for volume labels if it doesn't exist yet
+    var label[] volumeLabels = array.new<label>()
+    // Clear existing volume labels
+    f_clearLabelArray(volumeLabels)
+
+    // Calculate the maximum TOTAL volume across all strikes
+    maxTotalVol = 0.0
+    for k = 0 to array.size(strikePrices)-1 // Use strikePrices size as it matches vol arrays
+        cv = array.get(callVols, k)
+        pv = array.get(putVols,  k)
+        // Ensure we handle potential 'na' values, treating them as 0 for summation
+        currentTotalVol = (na(cv) ? 0.0 : cv) + (na(pv) ? 0.0 : pv)
+        maxTotalVol := math.max(maxTotalVol, currentTotalVol)
+    maxTotalVol := maxTotalVol == 0 ? 1 : maxTotalVol   // avoid div‑by‑zero
+
+    bgColor   = color.black
+    borderC   = color.new(color.gray,  50)
+    textCol   = color.white
+
+    availableSpace  = barOffset - 2                 // keep 2‑bar gutter
+    fullWidth       = maxProfileWidthBars
+    x0        = bar_index + barOffset
+    // [NEW] Adjusted bar height calculation with spacing factor
+    barH = effectiveSpacing * 0.4 * barHeightFactor * (1.0 - profileBarSpacing)
+
+    // --- NEW: Find Top 3 Unique Non-Zero Volumes for Calls and Puts ---
+    float[] top3CallVols = getTopNUniqueValues(callVols, 3)
+    float[] top3PutVols = getTopNUniqueValues(putVols, 3)
+
+    // Get the actual volume values for ranking
+    float top1CallVol = array.get(top3CallVols, 0)
+    float top2CallVol = array.get(top3CallVols, 1)
+    float top3CallVol = array.get(top3CallVols, 2)
+    float top1PutVol = array.get(top3PutVols, 0)
+    float top2PutVol = array.get(top3PutVols, 1)
+    float top3PutVol = array.get(top3PutVols, 2)
+    // --- END NEW ---
+
+    // [NEW] For volume delta plot
+    if showVolumeDeltaPlot
+        // First find max absolute delta for scaling
+        maxAbsDelta = 0.0
+        for k = 0 to array.size(volumeDeltas)-1
+            delta = array.get(volumeDeltas, k)
+            maxAbsDelta := math.max(maxAbsDelta, math.abs(delta))
+        
+        // Avoid division by zero
+        maxAbsDelta := maxAbsDelta == 0 ? 1 : maxAbsDelta
+        
+        // Draw volume delta line for each strike
+        for k = 0 to array.size(strikePrices)-1
+            strk = array.get(strikePrices, k)
+            delta = array.get(volumeDeltas, k)
+            
+            // Scale delta for display (max width = fullWidth / 3)
+            scaledDelta = (delta / maxAbsDelta) * (fullWidth / 3)
+            
+            // Determine line end position based on delta sign
+            x1 = x0
+            x2 = math.round(x0 + scaledDelta)
+            
+            // Create line with color based on delta sign (positive = call dominant, negative = put dominant)
+            deltaColor = delta >= 0 ? color.new(color.green, 30) : color.new(color.red, 30)
+            
+            deltaLine = line.new(x1=x1, y1=strk, x2=x2, y2=strk, color=deltaColor, width=1, style=line.style_dotted)
+            array.push(volumeDeltaLines, deltaLine)
+
+    for k = 0 to array.size(strikePrices)-1
+        strk = array.get(strikePrices, k)
+        // When calculating widths
+        cVol = array.get(callVols, k)    // always ≥ 0 now
+        pVol = array.get(putVols,  k)    // always ≥ 0 now
+        // Handle NaN values
+        cVol := na(cVol) ? 0.0 : cVol
+        pVol := na(pVol) ? 0.0 : pVol
+
+        totalVol = cVol + pVol
+        // Then calculate widths as before
+        totalW = totalVol > 0 ? (totalVol / maxTotalVol) * fullWidth : 0
+        callSegmentW = totalVol > 0 ? (cVol / totalVol) * totalW : 0
+        putSegmentW  = totalVol > 0 ? (pVol / totalVol) * totalW : 0
+
+        // --- NEW: Determine Ranked Colors ---
+        // Determine Call Color based on rank
+                // --- NEW: Determine Ranked Colors ---
+        // Determine Call Color based on rank
+        color currentCallColorBase = switch
+            cVol > 0 and not na(top1CallVol) and cVol == top1CallVol => callColorRank1Base // Corrected: Removed '?'
+            cVol > 0 and not na(top2CallVol) and cVol == top2CallVol => callColorRank2Base // Corrected: Removed '?'
+            cVol > 0 and not na(top3CallVol) and cVol == top3CallVol => callColorRank3Base // Corrected: Removed '?'
+            => callColorOtherBase // Default/Other rank
+
+        // Determine Put Color based on rank
+        color currentPutColorBase = switch
+            pVol > 0 and not na(top1PutVol) and pVol == top1PutVol => putColorRank1Base // Corrected: Removed '?'
+            pVol > 0 and not na(top2PutVol) and pVol == top2PutVol => putColorRank2Base // Corrected: Removed '?'
+            pVol > 0 and not na(top3PutVol) and pVol == top3PutVol => putColorRank3Base // Corrected: Removed '?'
+            => putColorOtherBase // Default/Other rank
+
+        // Apply user-defined opacity
+        color finalCallColor = color.new(currentCallColorBase, barOpacity)
+        color finalPutColor = color.new(currentPutColorBase, barOpacity)
+        // --- END NEW ---
+
+        // draw larger underneath, smaller on top
+        if cVol >= pVol
+            if cVol > 0
+                // Use finalCallColor here
+                cBox = box.new(left=math.round(x0-totalW), top=strk+barH, right=x0, bottom=strk-barH, border_color=borderC, border_width=1, bgcolor=finalCallColor)
+                array.push(callBoxes, cBox)
+            if putSegmentW > 0
+                // Use finalPutColor here
+                pBox = box.new(left=math.round(x0-putSegmentW), top=strk+barH, right=x0, bottom=strk-barH, border_color=borderC, border_width=1, bgcolor=finalPutColor)
+                array.push(putBoxes, pBox)
+        else
+            if pVol > 0
+                // Use finalPutColor here
+                pBox = box.new(left=math.round(x0-totalW), top=strk+barH, right=x0, bottom=strk-barH, border_color=borderC, border_width=1, bgcolor=finalPutColor)
+                array.push(putBoxes, pBox)
+            if callSegmentW > 0
+                // Use finalCallColor here
+                cBox = box.new(left=math.round(x0-callSegmentW), top=strk+barH, right=x0, bottom=strk-barH, border_color=borderC, border_width=1, bgcolor=finalCallColor)
+                array.push(callBoxes, cBox)
+
+        // strike label
+        totalVolFormatted = showRoundedVolumes ? str.tostring(math.round(totalVol/1000)) + "k" : f_format_number_with_commas(totalVol)
+
+        if showLabelsInside
+            // For inside bar positioning, include total volume in the label
+            lbl = label.new(x0-20, strk, text=str.tostring(strk) + " (" + totalVolFormatted + ")", style=label.style_label_left, color=color.new(bgColor,100), textcolor=textCol, size=txtSize)
+            // FIX: Add the label to the array for proper cleanup
+            array.push(strikeLbls, lbl)
+        else
+            // Original outside bar positioning with total volume
+            lbl = label.new(x0+2, strk, text=str.tostring(strk) + " (" + totalVolFormatted + ")", style=label.style_label_left, color=color.new(bgColor,100), textcolor=textCol, size=txtSize)
+            array.push(strikeLbls, lbl)
+
+        // volume values label
+        if showLabelsOnBars
+            valTxt = ""
+            // Calculate percentages for THIS STRIKE (call% + put% = 100%)
+            totalStrikeVol = cVol + pVol
+            strikeCallPerc = totalStrikeVol > 0 ? (cVol / totalStrikeVol) * 100 : 0
+            strikePutPerc = totalStrikeVol > 0 ? (pVol / totalStrikeVol) * 100 : 0
+
+            // Format the percentages to show up to 1 decimal place
+            strikeCallPercStr = str.tostring(strikeCallPerc, "#.0") + "%"
+            strikePutPercStr = str.tostring(strikePutPerc, "#.0") + "%"
+
+            if showRoundedVolumes
+                valTxt := " C:" + str.tostring(math.round(cVol/1000)) + "k (" + strikeCallPercStr + ") | P: " + str.tostring(math.round(pVol/1000)) + "k (" + strikePutPercStr + ")"
+            else
+                // Use our comma formatting function
+                valTxt := " C:" + f_format_number_with_commas(cVol) + " (" + strikeCallPercStr + ") | P: " + f_format_number_with_commas(pVol) + " (" + strikePutPercStr + ")"
+
+            int effectiveVolumeOffset = showLabelsInside ? 5 : volumeLabelOffset
+    
+            vlbl = label.new(math.round(x0 + effectiveVolumeOffset), strk, text=valTxt, style=label.style_label_left, color = showNoStyle ? color.new(bgColor, 100) : strk == pocLevel ? color.new(color.orange, 70) : (strk == atmLive) ? color.new(color.yellow, 70) : (pVol > cVol ? color.new(color.red, 70) : cVol > pVol ? color.new(color.green, 70) : na), textcolor=textCol, size=txtSize)
+            // Add volume labels to the volumeLabels array for proper cleanup
+            array.push(volumeLabels, vlbl)
+
+
+
+// Clear arrays for this calculation cycle
+array.clear(weightedStrikeVols)
+
+if listReady and barstate.islast
+    //----------------------------------------
+    // Calculate all shared values for both tables
+    //----------------------------------------
+    
+    // ===== 1. CALCULATE WEIGHTED VOLUMES BY STRIKE DISTANCE =====
+    float weightedPutsOTM = 0.0
+    float weightedPutsITM = 0.0
+    float weightedCallsOTM = 0.0
+    float weightedCallsITM = 0.0
+    float callsITM = 0.0
+    float callsATM = 0.0 
+    float callsOTM = 0.0
+    float putsITM = 0.0
+    float putsATM = 0.0
+    float putsOTM = 0.0
+    
+    // Clear arrays for weighted calculations
+    array.clear(weightedStrikeVols)
+    
+    // Process all strikes to categorize volumes
+    for i = 0 to array.size(strikePrices)-1
+        strike = array.get(strikePrices, i)
+        callVol = array.get(callVols, i)
+        putVol = array.get(putVols, i)
+        
+        // Calculate distance from ATM as a percentage for weighting
+        distancePercent = math.abs(strike - atmLive) / atmLive * 100
+        
+        // Improved delta approximation - closer to ATM = higher weight
+        deltaWeight = math.exp(-0.05 * distancePercent)
+        
+        // Categorize by moneyness with exact ATM match
+        if strike == atmLive
+            callsATM += callVol
+            putsATM += putVol
+        else if strike < atmLive
+            // Below current price: Calls ITM, Puts OTM
+            callsITM += callVol * deltaWeight  // Apply delta weight
+            putsOTM += putVol * deltaWeight    // Apply delta weight
+        else
+            // Above current price: Calls OTM, Puts ITM
+            callsOTM += callVol * deltaWeight  // Apply delta weight
+            putsITM += putVol * deltaWeight    // Apply delta weight
+
+    // 3. Calculate sentiment ratios based on weighted volumes
+    // Core sentiment calculation
+    primaryRatio = (putsITM + putsATM) == 0 ? 0.0 :                     (putsOTM - (putsITM + putsATM)) /                     math.max((putsOTM + putsITM + putsATM), 1)
+
+    hedgingRatio = (callsOTM + callsATM) == 0 ? 0.0 :                     (callsITM - (callsOTM + callsATM)) /                     math.max((callsITM + callsOTM + callsATM), 1)
+
+    // 4. Calculate volume momentum (comparing to previous values)
+    directionDeltaPercentage := (primaryRatio - prevPrimaryRatio) * 100
+
+    // Store current values for next comparison 
+    if barstate.isconfirmed
+        prevPrimaryRatio := primaryRatio
+        prevHedgingRatio := hedgingRatio
+    
+    // Core sentiment calculation
+    
+    // Determine sentiment with a threshold for neutral zone
+    float sentimentThreshold = 0.15
+    primarySentiment := primaryRatio > sentimentThreshold ? "Bullish" :                     primaryRatio < -sentimentThreshold ? "Bearish" :                     "Neutral"
+    
+    hedgingSentiment := hedgingRatio > sentimentThreshold ? "Bullish Hedging" :                     hedgingRatio < -sentimentThreshold ? "Bearish Hedging" :                     "Neutral Hedging"
+    globalPrimaryRatio := primaryRatio
+    globalHedgeRatio   := hedgingRatio
+    biasDiff      := globalPrimaryRatio * 100 - math.abs(globalHedgeRatio * 100)
+    biasDiffDelta := na(prevBiasDiff) ? 0 : biasDiff - prevBiasDiff
+    if barstate.isconfirmed
+        prevBiasDiff := biasDiff
+    
+    // ===== UNIFIED APPROACH: No longer need narrative position calculations =====
+    // Removed Put Position/Call Position logic - now using percentage-based approach
+    
+    // Calculate confidence based on magnitude of signals
+    float primaryMagnitude = math.abs(primaryRatio)
+    float hedgingMagnitude = math.abs(hedgingRatio)
+    
+    // Base confidence calculation (scale appropriately)
+    float primaryConfidence = math.min(primaryMagnitude * 200, 100)
+    float hedgingConfidence = math.min(hedgingMagnitude * 150, 80)
+    
+    // Duration factor - rewards persistent signals
+    float durationBonus = math.min(sentimentDuration * 5, 50)
+
+    // Volume clarity - how concentrated volume is at key strikes
+    float maxStrikeVolume = math.max(array.max(callVols), array.max(putVols))
+    float avgStrikeVolume = (array.sum(callVols) + array.sum(putVols)) / (array.size(callVols) * 2)
+    float volumeConcentration = maxStrikeVolume / math.max(avgStrikeVolume, 1)
+    float volumeClarity = math.min(volumeConcentration * 20, 30)
+
+    // Contradiction penalty when signals oppose
+// Contradiction penalty when signals oppose
+    float contradictionPenalty = 0.0
+    if (str.contains(primarySentiment, "Bullish") and str.contains(hedgingSentiment, "Bearish")) or    (str.contains(primarySentiment, "Bearish") and str.contains(hedgingSentiment, "Bullish"))
+        contradictionPenalty := math.min(hedgingMagnitude * 70, 50)
+
+    // Price-action alignment bonus
+    float priceChangeDirection = close > close[1] ? 1.0 : -1.0
+    float priceAlignmentBonus = 0.0
+    if (priceChangeDirection > 0 and str.contains(primarySentiment, "Bullish")) or    (priceChangeDirection < 0 and str.contains(primarySentiment, "Bearish"))
+        priceAlignmentBonus := 10.0
+
+    // Final confidence calculation
+
+    
+    // Calculate directional skew - Important for display!
+    // Calculate average call and put volumes for weighting
+    float avgCallVolume = array.sum(callVols) / math.max(array.size(callVols), 1)
+    float avgPutVolume = array.sum(putVols) / math.max(array.size(putVols), 1)
+
+    // Enhanced directional skew with volume weighting
+    float weightedBull = (callsOTM * avgCallVolume) + (putsITM * avgPutVolume)
+    float weightedBear = (putsOTM * avgPutVolume) + (callsITM * avgCallVolume)
+    globalDirectionalSkew := weightedBear > 0 ? weightedBull / weightedBear : 1.0
+
+    
+    // Format and color the skew reading
+    globalSkewText := na(globalDirectionalSkew) ? "N/A" :                     str.tostring(globalDirectionalSkew, "#.00") +                     (globalDirectionalSkew > 1.2 ? " (bullish)" :                    globalDirectionalSkew < 0.8 ? " (bearish)" : " (neutral)")
+    
+    globalSkewColor := globalDirectionalSkew > 1.2 ? color.green :                    globalDirectionalSkew < 0.8 ? color.red :                    color.gray
+    
+    // Calculate volume-weighted DIM - Important for display!
+    float callWgtAvg = 0.0
+    float putWgtAvg = 0.0 
+    float callWgtTotal = 0.0
+    float putWgtTotal = 0.0
+    
+    for i = 0 to array.size(strikePrices)-1
+        strike = array.get(strikePrices, i)
+        callVol = array.get(callVols, i) * array.get(callPrices, i)   // ≈ notional
+        putVol  = array.get(putVols,  i) * array.get(putPrices,  i)
+
+        
+        // Calculate distance from ATM 
+        dist = (strike - atmLive) / atmLive * 100
+        
+        // Weight by volume and distance
+        callWgtAvg += dist * callVol
+        putWgtAvg += dist * putVol
+        callWgtTotal += callVol
+        putWgtTotal += putVol
+    
+    // Calculate volume-weighted averages - Important for display!
+    globalCallSkew := callWgtTotal > 0 ? callWgtAvg / callWgtTotal : 0
+    globalPutSkew := putWgtTotal > 0 ? putWgtAvg / putWgtTotal : 0
+    
+    // Combined confidence score
+    // Final confidence calculation
+    calculatedConfidence := (primaryConfidence * 0.6 +   hedgingConfidence * 0.25 +   volumeClarity * 0.15 +   durationBonus +   priceAlignmentBonus -  contradictionPenalty)
+
+    // Ensure confidence stays in valid range
+    calculatedConfidence := math.max(math.min(calculatedConfidence, 100), 10)
+
+    string oldSentiment = previousSentiment
+    
+    // Create the combined sentiment for trend tracking
+// after you calculate primarySentiment, hedgingSentiment:
+    string combinedSentiment = primarySentiment + " with " + hedgingSentiment
+
+    // ─────── SENTIMENT SHIFT LOGIC ───────
+    if barstate.islast
+        if na(previousSentiment)
+            // very first bar
+            sentimentShift      := "→ Initial Reading"
+            sentimentShiftColor := color.white
+            sentimentDuration   := 0
+        else if combinedSentiment != previousSentiment
+            // bias just changed
+            sentimentDuration   := 1
+            // choose your own transition messages here:
+            if str.contains(previousSentiment, "Neutral") and str.contains(combinedSentiment, "Bullish")
+                sentimentShift      := "↑ Emerging Bullish Bias"
+                sentimentShiftColor := color.green
+            else if str.contains(previousSentiment, "Neutral") and str.contains(combinedSentiment, "Bearish")
+                sentimentShift      := "↓ Emerging Bearish Bias"
+                sentimentShiftColor := color.red
+            else if str.contains(combinedSentiment, "Neutral")
+                sentimentShift      := "→ Fading " + (str.contains(previousSentiment,"Bullish") ? "Bullish" : "Bearish")
+                sentimentShiftColor := color.yellow
+            else if str.contains(previousSentiment, "Bullish") and str.contains(combinedSentiment, "Bearish")
+                sentimentShift      := "↓ Reversal to Bearish"
+                sentimentShiftColor := color.red
+            else if str.contains(previousSentiment, "Bearish") and str.contains(combinedSentiment, "Bullish")
+                sentimentShift      := "↑ Reversal to Bullish"
+                sentimentShiftColor := color.green
+            else
+                sentimentShift      := "↔ Changing Bias"
+                sentimentShiftColor := color.gray
+        else
+            // sentiment is the same as last bar
+            sentimentDuration += 1
+            bool   isBull = str.contains(combinedSentiment, "Bullish")
+            bool   isBear = str.contains(combinedSentiment, "Bearish")
+            color  dirCol = isBull ? color.green : isBear ? color.red : color.yellow
+
+            if sentimentDuration >= 10
+                sentimentShift      := "→ Very Steady (" + str.tostring(sentimentDuration) + ")"
+                sentimentShiftColor := dirCol
+            else if sentimentDuration >= 5
+                sentimentShift      := "→ Steady (" + str.tostring(sentimentDuration) + ")"
+                sentimentShiftColor := dirCol
+            else
+                sentimentShift      := "→ Maintaining (" + str.tostring(sentimentDuration) + ")"
+                sentimentShiftColor := dirCol
+
+    // finally, store for next bar comparison
+    previousSentiment := combinedSentiment
+    
+    // Determine strength label based on duration
+    strengthLabel := sentimentStrength >= 0.8 ? "Strong" :                     sentimentStrength >= 0.5 ? "Moderate" :                     sentimentStrength >= 0.3 ? "Developing" : "Early"
+    float priceChange = close - close[1]
+    float bonus = 0.0
+    if primarySentiment == "Bullish" and priceChange > 0
+        bonus := 5
+    else if primarySentiment == "Bearish" and priceChange < 0
+        bonus := 5
+    calculatedConfidence := math.min(calculatedConfidence + bonus, 100)
+    // Update sentiment shift text and color
+    
+    
+    // Create confidence indicator for visual display
+    [confIndicator, confIndicatorColor] = getConfidenceIndicator(calculatedConfidence)
+
+    
+        
+    // Final formatted display for the table
+    string momentumArrow = ""
+    if str.contains(primarySentiment, "Bullish")
+        momentumArrow := "↑ "  // Up arrow for bullish
+    else if str.contains(primarySentiment, "Bearish")
+        momentumArrow := "↓ "  // Down arrow for bearish
+    else
+        momentumArrow := "→ "  // Right arrow for neutral
+
+    // Add this to better quantify the component strengths
+    string primaryStrengthDesc = ""
+    string hedgingStrengthDesc = ""
+
+    // Primary sentiment strength description
+    if primaryMagnitude > 0.5
+        primaryStrengthDesc := "Strong "
+    else if primaryMagnitude > 0.3
+        primaryStrengthDesc := "Moderate "
+    else if primaryMagnitude > 0.15
+        primaryStrengthDesc := "Mild "
+    else
+        primaryStrengthDesc := "Weak "
+
+    // Hedging sentiment strength description
+    if hedgingMagnitude > 0.5
+        hedgingStrengthDesc := "Strong "
+    else if hedgingMagnitude > 0.3
+        hedgingStrengthDesc := "Moderate "
+    else if hedgingMagnitude > 0.15
+        hedgingStrengthDesc := "Mild "
+    else
+        hedgingStrengthDesc := "Weak "
+
+    // Update the combined sentiment display to show strength of each component
+    formattedSentimentLabel := momentumArrow + confIndicator + " " + primaryStrengthDesc + primarySentiment +                             " with " + hedgingStrengthDesc + hedgingSentiment +                             " (" + strengthLabel + ", " + str.tostring(math.round(calculatedConfidence)) + "%)"   
+    // Store values in global variables for table access
+    globalSentimentConfidence := calculatedConfidence
+    globalSentimentLabel := formattedSentimentLabel
+
+
+
+
+// ==================== TABLE CREATION ====================
+
+// ──────── SUMMARY TABLE ─────────────────────────────────
+// [NEW] Expanded table with more columns + enhanced separators
+
+
+var float[] sortedDisplayDeltaChanges = array.new_float()
+var float[] sortedDisplayDeltaChanges5 = array.new_float()
+if (showTable or showInfoPanel) and listReady and barstate.islast
+    //----------------------------------------
+    // 1) Build & sort temporary arrays
+    //----------------------------------------
+
+    // ── SPARKLINE HISTORY ──────────────────────────────────
+    bgColor = useWhiteBackground
+    textCol   = getTextColor()
+
+    // Clear sorted arrays
+    array.clear(sortedStrikes)
+    array.clear(sortedCallVols)
+    array.clear(sortedPutVols)
+    array.clear(sortedCallPrices)
+    array.clear(sortedPutPrices)
+    array.clear(sortedTotalVols)
+    array.clear(sortedCallPriceChanges)
+    array.clear(sortedPutPriceChanges)
+    array.clear(sortedCallPutRatios)
+    array.clear(sortedVolumeDelta)
+    array.clear(sortedVolumeDeltaChanges)
+    array.clear(sortedVolumeDeltaChanges5)  // [NEW]
+
+    array.clear(sortedDisplayDeltaChanges)
+    array.clear(sortedDisplayDeltaChanges5)
+
+    for i = 0 to array.size(strikePrices) - 1
+        array.push(sortedStrikes,            array.get(strikePrices,       i))
+        array.push(sortedCallVols,           array.get(callVols,           i))
+        array.push(sortedPutVols,            array.get(putVols,            i))
+        array.push(sortedCallPrices,         array.get(callPrices,         i))
+        array.push(sortedPutPrices,          array.get(putPrices,          i))
+        array.push(sortedTotalVols,          array.get(totalVols,          i))
+        array.push(sortedCallPriceChanges,   array.get(callPriceChanges,   i))
+        array.push(sortedPutPriceChanges,    array.get(putPriceChanges,    i))
+        array.push(sortedCallPutRatios,      array.get(callPutRatios,      i))
+        array.push(sortedVolumeDelta,        array.get(volumeDeltas,       i))
+        array.push(sortedVolumeDeltaChanges, array.get(volumeDeltaChanges, i))
+        array.push(sortedVolumeDeltaChanges5, array.get(volumeDeltaChanges5, i))  // [NEW]
+        array.push(sortedDisplayDeltaChanges, array.get(displayDeltaChanges, i))
+        array.push(sortedDisplayDeltaChanges5, array.get(displayDeltaChanges5, i))
+
+    // Bubble-sort strikes descending (swap in all arrays)
+    // helper to swap two elements in any float array
+
+    // Bubble-sort strikes descending (swap in all arrays)
+    for i = 0 to array.size(sortedStrikes) - 2
+        for j = 0 to array.size(sortedStrikes) - 2 - i
+            if array.get(sortedStrikes, j) < array.get(sortedStrikes, j + 1)
+                // swap all the parallel arrays
+                f_swap(sortedStrikes,            j, j+1)
+                f_swap(sortedCallVols,           j, j+1)
+                f_swap(sortedPutVols,            j, j+1)
+                f_swap(sortedCallPrices,         j, j+1)
+                f_swap(sortedPutPrices,          j, j+1)
+                f_swap(sortedTotalVols,          j, j+1)
+                f_swap(sortedCallPriceChanges,   j, j+1)
+                f_swap(sortedPutPriceChanges,    j, j+1)
+                f_swap(sortedCallPutRatios,      j, j+1)
+                f_swap(sortedVolumeDelta,        j, j+1)
+                f_swap(sortedVolumeDeltaChanges, j, j+1)
+                f_swap(sortedVolumeDeltaChanges5, j, j+1)  // [NEW]
+                f_swap(sortedDisplayDeltaChanges, j, j+1)
+                f_swap(sortedDisplayDeltaChanges5, j, j+1)
+
+
+    //----------------------------------------
+    // 2) Compute sums, POC index, etc.
+    //----------------------------------------
+// Calculate sums with safety checks
+sumC = 0.0
+sumP = 0.0
+sumDeltaChange = 0.0
+sumDeltaChange5 = 0.0  // [NEW]
+
+// Only loop if arrays have data
+if array.size(sortedStrikes) > 0
+    for r = 0 to array.size(sortedStrikes) - 1
+        sumC += array.get(sortedCallVols, r)
+        sumP += array.get(sortedPutVols,  r)
+        sumDeltaChange += array.get(sortedVolumeDeltaChanges, r)
+        // [NEW] Safety check for 5-period array
+        if array.size(sortedVolumeDeltaChanges5) > r
+            sumDeltaChange5 += array.get(sortedVolumeDeltaChanges5, r)
+
+    totalOptionsVolume = sumC + sumP
+    callPercentOfTotal = totalOptionsVolume > 0 ? sumC / totalOptionsVolume * 100 : 0
+    putPercentOfTotal  = totalOptionsVolume > 0 ? sumP / totalOptionsVolume * 100 : 0
+    totalVolumeDelta   = sumC - sumP
+    overallCallPutRatio = sumP > 0 ? sumC / sumP : 0
+    pocIndex = array.indexof(sortedStrikes, pocLevel)
+    // Add this to the section where you calculate totals (in the barstate.islast block)
+    // Around where you calculate totalVolume, callPercentOfTotal, etc.
+    
+    // Calculate ITM, ATM, OTM volumes
+    float callsITM = 0.0
+    float callsATM = 0.0 
+    float callsOTM = 0.0
+    float putsITM = 0.0
+    float putsATM = 0.0
+    float putsOTM = 0.0
+    
+    
+    
+    // Categorize and sum volumes
+    for i = 0 to array.size(strikePrices)-1
+        strike = array.get(strikePrices, i)
+        callVol = array.get(callVols, i)
+        putVol = array.get(putVols, i)
+
+            // Determine moneyness using exact atmLive strike
+        if strike == atmLive
+            // At The Money - exact match
+            callsATM += callVol
+            putsATM += putVol
+        else if strike < atmLive
+            // Calls ITM, Puts OTM
+            callsITM += callVol
+            putsOTM += putVol
+        else
+            // Calls OTM, Puts ITM
+            callsOTM += callVol
+            putsITM += putVol
+        
+    
+    // Determine sentiment based on rules
+        // Add a threshold for neutral zone
+
+
+
+    //----------------------------------------
+    // 3) Clear table  
+    //----------------------------------------
+    table.clear(volTable, 0, 0, 10, baseRows - 1)
+
+    
+    //----------------------------------------
+    // [NEW] 3.5) DATE DISPLAY AT TOP
+    //----------------------------------------
+    // Define darker separator colors
+    color darkSepColor = color.new(color.gray, 50)
+    color lightSepColor = color.new(color.gray, 70)
+    textCol   = getTextColor()
+    
+    // Create title row with expiry date
+    dateString = "Expiry: " + str.format("{0} {1} {2}, {3}, D Volume", 
+                 dayofweek == 0 ? "Sun" : 
+                 dayofweek == 1 ? "Mon" : 
+                 dayofweek == 2 ? "Tue" : 
+                 dayofweek == 3 ? "Wed" : 
+                 dayofweek == 4 ? "Thu" : 
+                 dayofweek == 5 ? "Fri" : "Sat", 
+                 month == 1 ? "Jan" : 
+                 month == 2 ? "Feb" : 
+                 month == 3 ? "Mar" : 
+                 month == 4 ? "Apr" : 
+                 month == 5 ? "May" : 
+                 month == 6 ? "Jun" : 
+                 month == 7 ? "Jul" : 
+                 month == 8 ? "Aug" : 
+                 month == 9 ? "Sep" : 
+                 month == 10 ? "Oct" : 
+                 month == 11 ? "Nov" : "Dec", 
+                 dayofmonth, year)
+    
+    // Add date header
+    table.cell(volTable, 0, 0, dateString, text_color= textCol, text_halign = text.align_center, text_size = tblSize)
+    table.merge_cells(volTable, 0, 0, 13, 0)
+    
+    // Add Past Date Warning if applicable
+    isPastDate = (effectiveYear < year(timenow)) or (effectiveYear == year(timenow) and effectiveMonth < month(timenow)) or  (effectiveYear == year(timenow) and effectiveMonth == month(timenow) and effectiveDay < dayofmonth(timenow))
+    
+    if isPastDate
+        warningRow = 1
+        table.cell(volTable, 0, warningRow, "⚠️ WARNING: Selected date is in the past. Data may not load correctly.", bgcolor = color.new(color.red, 70), text_color= textCol, text_halign = text.align_center, text_size = tblSize)
+        table.merge_cells(volTable, 0, warningRow, 13, warningRow)
+    
+    // Add section separator
+    sepRow = isPastDate ? 2 : 1
+    for col = 0 to 13
+        table.cell(volTable, col, sepRow, "", bgcolor = darkSepColor)
+
+    //----------------------------------------
+    // 4) HEADERS (row after separator)
+    //----------------------------------------
+    headerRow = sepRow + 1
+    
+    // Create call section header
+    // First column is for POC/ATM indicators
+    table.cell(volTable, 0, headerRow, "", bgcolor = color.new(color.white, 80), text_size = tblSize)
+    
+    // Calls section header
+    table.cell(volTable, 1, headerRow, "Calls", bgcolor = color.new(color.green, 80), text_color= textCol, text_halign = text.align_center, text_size = tblSize)
+    table.merge_cells(volTable, 1, headerRow, 3, headerRow)
+    
+    // Strike column header
+    table.cell(volTable, 4, headerRow, "Strike", bgcolor = color.new(color.white, 80), text_color= textCol, text_halign = text.align_center, text_size = tblSize)
+    
+    // Create puts section header
+    table.cell(volTable, 5, headerRow, "Puts", bgcolor = color.new(color.red, 80), text_color= textCol, text_halign = text.align_center, text_size = tblSize)
+    table.merge_cells(volTable, 5, headerRow, 7, headerRow)
+    
+    // Extra stats headers
+    table.cell(volTable, 8, headerRow, "Ratio", bgcolor = color.new(color.purple, 80), text_color= textCol, text_size = tblSize)
+    table.cell(volTable, 9, headerRow, "ΔVol", bgcolor = color.new(color.aqua, 80), text_color= textCol, text_size = tblSize)
+    if showVolDeltaChange
+        table.cell(volTable, 10, headerRow, "ΔΔVol", bgcolor = color.new(color.white, 80), text_color= textCol, text_size = tblSize)
+    // [NEW] 5-Period column
+    if showVolDeltaChange5
+        table.cell(volTable, 11, headerRow, "ΔΔVol(5)", bgcolor = color.new(color.teal, 80), text_color= textCol, text_size = tblSize)
+    
+    //----------------------------------------
+    // 4.5) SUBHEADERS
+    //----------------------------------------
+    subHeaderRow = headerRow + 1
+    
+    // Empty indicator column
+    table.cell(volTable, 0, subHeaderRow, "", bgcolor = color.new(color.white, 90), text_size = tblSize)
+    
+    // Call subheaders
+    table.cell(volTable, 1, subHeaderRow, "Δ", bgcolor = color.new(color.white, 90), text_color= textCol, text_size = tblSize)
+    table.cell(volTable, 2, subHeaderRow, "Price", bgcolor = color.new(color.white, 90), text_color= textCol, text_size = tblSize)
+    table.cell(volTable, 3, subHeaderRow, "Volume", bgcolor = color.new(color.white, 90), text_color = color.green, text_size = tblSize)
+
+    // Strike subheader
+    table.cell(volTable, 4, subHeaderRow, "", bgcolor = color.new(color.white, 90), text_size = tblSize)
+
+    // Put subheaders
+    table.cell(volTable, 5, subHeaderRow, "Volume", bgcolor = color.new(color.white, 90), text_color = color.red, text_size = tblSize)
+    table.cell(volTable, 6, subHeaderRow, "Price", bgcolor = color.new(color.white, 90), text_color= textCol, text_size = tblSize)
+    table.cell(volTable, 7, subHeaderRow, "Δ", bgcolor = color.new(color.white, 90), text_color= textCol, text_size = tblSize)
+    
+    // Other subheaders remain empty to maintain alignment
+    table.cell(volTable, 8, subHeaderRow, "", bgcolor = color.new(color.white, 90), text_size = tblSize)
+    table.cell(volTable, 9, subHeaderRow, "", bgcolor = color.new(color.white, 90), text_size = tblSize)
+    if showVolDeltaChange
+        table.cell(volTable, 10, subHeaderRow, "", bgcolor = color.new(color.white, 90), text_size = tblSize)
+    
+    // Add another separator after subheaders
+    for col = 0 to 13
+        table.cell(volTable, col, subHeaderRow + 1, "", bgcolor = lightSepColor)
+
+    //----------------------------------------
+    // 5) DATA ROWS (start after subheader separator)
+    //----------------------------------------
+    startDataRow = subHeaderRow + 2
+    
+    // Format strings with arrows
+
+    
+    // Current price for highlighting ATM row
+    atmRowBgColor = color.new(color.yellow, 80)
+    pocRowBgColor = color.new(color.orange, 80)
+    
+    for r = 0 to array.size(sortedStrikes) - 1
+        row = startDataRow + r
+        s      = array.get(sortedStrikes,   r)
+        cv     = array.get(sortedCallVols,   r)
+        pv     = array.get(sortedPutVols,    r)
+        cp     = array.get(sortedCallPrices, r)
+        pp     = array.get(sortedPutPrices,  r)
+        cpc    = array.get(sortedCallPriceChanges,   r)
+        ppc    = array.get(sortedPutPriceChanges,    r)
+        ratio  = array.get(sortedCallPutRatios,      r)
+        delta  = array.get(sortedVolumeDelta,        r)
+        dChg   = array.get(sortedDisplayDeltaChanges, r)
+        dChg5  = array.get(sortedDisplayDeltaChanges5, r)
+        total  = cv + pv
+        callPct= total>0 ? (cv/total)*100 : 0
+        putPct = total>0 ? (pv/total)*100 : 0
+        
+        // Store pointer text for first column
+        ptrTxt = ""
+        color ptrBg = na
+        ptrCol = color.white
+        
+        // Determine if this is ATM or POC
+// 1. Calculate rounded ATM strike so it matches the table rows
+        float currentAtmStrike = roundToNearest(atmLive, effectiveRoundStrike)
+
+        // 2. Boolean flags to make the logic cleaner
+        bool isAtm = (s == currentAtmStrike)
+        bool isPoc = (r == pocIndex)
+        
+        // 3. Variable to control text size specifically for this cell
+        string ptrTextSize = tblSize
+
+        // 4. Logic to handle Overlap, ATM, or POC
+        if isAtm and isPoc
+            ptrTxt := "ATM/POC"               // Combine text
+            ptrBg  := color.new(color.orange, 0) // Use POC Orange (usually indicates higher importance)
+            ptrCol := color.black             // Black text for contrast
+            //rowBgColor := pocRowBgColor       // Highlight the whole row
+            ptrTextSize := size.tiny          // FORCE TINY TEXT to fit both
+        else if isAtm
+            ptrTxt := "ATM" 
+            ptrBg  := color.new(color.yellow, 0)
+            ptrCol := color.black
+            //rowBgColor := atmRowBgColor
+        else if isPoc
+            ptrTxt := "POC"
+            ptrBg  := color.new(color.orange, 0)
+            ptrCol := color.white
+            //rowBgColor := pocRowBgColor
+        
+        // Format strings with arrows for delta values
+        cpStr = na(cp) ? "N/A" : str.tostring(cp, "#.00")
+        ppStr = na(pp) ? "N/A" : str.tostring(pp, "#.00")
+        
+        // Format change values with arrows
+        cpcStr = na(cpc) or cpc == 0 ? "0" : usePriceChangePercent ? (cpc > 0 ? "▲ " : "▼ ") + str.tostring(math.abs(cpc), "#.00") + "%" :(cpc > 0 ? "▲ " : "▼ ") + str.tostring(math.abs(cpc), "#.00")
+                    
+        ppcStr = na(ppc) or ppc == 0 ? "0" : usePriceChangePercent ? (ppc > 0 ? "▲ " : "▼ ") + str.tostring(math.abs(ppc), "#.00") + "%" : (ppc > 0 ? "▲ " : "▼ ") + str.tostring(math.abs(ppc), "#.00")
+                    
+        // Calculate colors based on values
+        cpcColor = cpc > 0 ? color.green : cpc < 0 ? color.red : color.gray
+        ppcColor = ppc > 0 ? color.green : ppc < 0 ? color.red : color.gray
+        
+        // Format volume values
+        cvStr = showRoundedVolumes ? str.tostring(cv/1000, "#.#") + "k" : f_format_number_with_commas(cv)
+        pvStr = showRoundedVolumes ? str.tostring(pv/1000, "#.#") + "k" : f_format_number_with_commas(pv)
+        
+        // Format ratio and delta values
+        // Format ratio
+        ratioStr = str.tostring(ratio, "#.00")
+
+        // --- UPDATED FORMATTING FOR COLUMNS 9, 10, 11 ---
+        // Uses formatDeltaChange for consistent "1.3k" style
+        
+        // Col 9: Total Delta
+        deltaStr = delta == 0 ? "0" : (delta > 0 ? "▲ " : "▼ ") + formatDeltaChange(math.abs(delta))
+        
+        // Col 10: Delta Change
+        dChgStr = dChg == 0 ? "0" : (dChg > 0 ? "▲ " : "▼ ") + formatDeltaChange(math.abs(dChg))
+
+        // Col 11: 5-Period Delta Change
+        dChg5Str = dChg5 == 0 ? "0" : (dChg5 > 0 ? "▲ " : "▼ ") + formatDeltaChange(math.abs(dChg5))
+        // ------------------------------------------------
+        // Determine colors based on values
+        deltaColor = delta > 0 ? color.green : delta < 0 ? color.red : color.gray
+        dChgColor = dChg > 0 ? color.green : dChg < 0 ? color.red : color.gray
+        
+        // Cell background colors based on volume thresholds and coloring rules from reference images
+        cvBg = cv == array.max(sortedCallVols) ? color.new(color.blue, 20) : na
+        pvBg = pv == array.max(sortedPutVols) ? color.new(color.fuchsia, 20) : na
+        
+        // Additional special cell coloring (purple for strike cells similar to reference image)
+        color strikeBg = na
+        
+        // Apply special strike formatting based on both call and put volumes
+        if cv > 100000 and pv > 100000
+            strikeBg := color.new(#b08227, 15)
+        else if cv > 20000 and pv > 20000
+            strikeBg := color.new(#8cc4f3, 28)
+
+            
+        // Apply row background color if it's ATM or POC
+        color rowBgColor = na
+        if not na(rowBgColor)
+            for col = 0 to 10
+                if col != 0  // Skip the indicator column
+                    table.cell(volTable, col, row, "", bgcolor = rowBgColor)
+        
+        // First column: ATM/POC indicator
+        table.cell(volTable, 0, row, ptrTxt, bgcolor = ptrBg, text_color = ptrCol, text_size = ptrTextSize)
+        
+        // Call columns
+        table.cell(volTable, 1, row, cpcStr, text_color = cpcColor, text_size = tblSize)
+        table.cell(volTable, 2, row, cpStr, text_color= textCol, text_size = tblSize)
+        table.cell(volTable, 3, row, cvStr, text_color = cv == array.max(sortedCallVols) ? textCol: color.green, bgcolor = cvBg, text_size = tblSize)
+
+        // Strike column
+        table.cell(volTable, 4, row, str.tostring(s), text_color= textCol, bgcolor = strikeBg, text_size = tblSize)
+
+        // Put columns
+        table.cell(volTable, 5, row, pvStr, text_color = pv == array.max(sortedPutVols) ? textCol : color.red, bgcolor = pvBg, text_size = tblSize)
+        table.cell(volTable, 6, row, ppStr, text_color= textCol, text_size = tblSize)
+        table.cell(volTable, 7, row, ppcStr, text_color = ppcColor, text_size = tblSize)
+        
+        // Additional stats columns
+        table.cell(volTable, 8, row, ratioStr, 
+                  text_color = ratio > 1.5 ? color.green : ratio < 0.67 ? color.red : textCol,
+                  bgcolor = ratio > 1.5 ? color.new(color.green, 70) : ratio < 0.67 ? color.new(color.red, 70) : na, text_size = tblSize)
+        
+        table.cell(volTable, 9, row, deltaStr, text_color = deltaColor, bgcolor = math.abs(delta) > highlightVolumeThreshold ? color.new(deltaColor, 70) : na, text_size = tblSize)
+        
+        if showVolDeltaChange
+            table.cell(volTable, 10, row, dChgStr, text_color = dChgColor,bgcolor = math.abs(dChg) > volDeltaChangeHighlightThreshold ? color.new(dChgColor, 70) : na, text_size = tblSize)
+
+        // [NEW] 5-Period ΔΔVol column
+        if showVolDeltaChange5
+            dChg5Str = dChg5 == 0 ? "0" : showRoundedVolumes ? (dChg5 > 0 ? "▲ " : "▼ ") + str.tostring(dChg5/1000, "#.#") + "k" : (dChg5 > 0 ? "▲ " : "▼ ") + f_format_number_with_commas(math.abs(dChg5))
+            dChg5Color = dChg5 > 0 ? color.green : dChg5 < 0 ? color.red : color.gray
+            table.cell(volTable, 11, row, dChg5Str, text_color = dChg5Color, bgcolor = math.abs(dChg5) > volDeltaChange5HighlightThreshold ? color.new(dChg5Color, 70) : na, text_size = tblSize)
+    //----------------------------------------
+    // 6) Add separator after data rows
+    //----------------------------------------
+    dataEndRow = startDataRow + array.size(sortedStrikes)
+    for col = 0 to 13
+        table.cell(volTable, col, dataEndRow, "", bgcolor = darkSepColor)
+    
+    //----------------------------------------
+    // 7) TOTALS ROW 
+    //----------------------------------------
+    totalRow = dataEndRow + 1
+    
+    // Format totals with commas
+    totalCallsStr = showRoundedVolumes ? str.tostring(sumC/1000, "#.#") + "k" : f_format_number_with_commas(sumC)
+    totalPutsStr = showRoundedVolumes ? str.tostring(sumP/1000, "#.#") + "k" : f_format_number_with_commas(sumP)
+    totalVolStr = showRoundedVolumes ? str.tostring((sumC + sumP)/1000, "#.#") + "k" : f_format_number_with_commas(sumC+sumP)
+    
+    // Call totals
+    table.cell(volTable, 3, totalRow, totalCallsStr, text_color = color.lime, text_size = tblSize)
+
+    // Show "Total Vol" in strike column
+    table.cell(volTable, 4, totalRow, "Total Vol", text_color = color.yellow, text_halign = text.align_center, text_size = tblSize)
+
+    // Put totals
+    table.cell(volTable, 5, totalRow, totalPutsStr, text_color = color.orange, text_size = tblSize)
+    
+    // Total ratio, delta, etc.
+    cpRatioStr = str.tostring(overallCallPutRatio, "#.00")
+    totalDeltaStr = showRoundedVolumes ? (totalVolumeDelta > 0 ? "▲ " : "▼ ") + str.tostring(math.round(math.abs(totalVolumeDelta)/1000)) + "k" :(totalVolumeDelta > 0 ? "▲ " : "▼ ") + f_format_number_with_commas(math.abs(totalVolumeDelta))
+    
+    table.cell(volTable, 8, totalRow, cpRatioStr, 
+               text_color= textCol,
+               bgcolor = overallCallPutRatio > 1.5 ? color.new(color.green, 50) : 
+                         overallCallPutRatio < 0.67 ? color.new(color.red, 50) : na, text_size = tblSize)
+                         
+    table.cell(volTable, 9, totalRow, totalDeltaStr, 
+               text_color = totalVolumeDelta > 0 ? color.green : color.red,
+               bgcolor = color.new(totalVolumeDelta > 0 ? color.green : color.red, 70), text_size = tblSize)
+        // --- INSERT THIS BLOCK HERE ---
+    if showVolDeltaChange
+        totalDeltaChangeStr = sumDeltaChange == 0 ? "0" :             showRoundedVolumes ?             (sumDeltaChange > 0 ? "▲ " : "▼ ") + str.tostring(math.round(math.abs(sumDeltaChange)/1000)) + "k" :             (sumDeltaChange > 0 ? "▲ " : "▼ ") + f_format_number_with_commas(math.abs(sumDeltaChange))
+        
+        table.cell(volTable, 10, totalRow, totalDeltaChangeStr, 
+                text_color = sumDeltaChange > 0 ? color.green : color.red,
+                bgcolor = color.new(sumDeltaChange > 0 ? color.green : color.red, 70), 
+                text_size = tblSize)
+
+    // [NEW] 5-Period totals
+    if showVolDeltaChange5
+        totalDeltaChange5Str = sumDeltaChange5 == 0 ? "0" :             showRoundedVolumes ?             (sumDeltaChange5 > 0 ? "▲ " : "▼ ") + str.tostring(math.round(math.abs(sumDeltaChange5)/1000)) + "k" :             (sumDeltaChange5 > 0 ? "▲ " : "▼ ") + f_format_number_with_commas(math.abs(sumDeltaChange5))
+        
+        table.cell(volTable, 11, totalRow, totalDeltaChange5Str, 
+                text_color = sumDeltaChange5 > 0 ? color.green : color.red,
+                bgcolor = color.new(sumDeltaChange5 > 0 ? color.green : color.red, 70), 
+                text_size = tblSize)
+    
+        // build a single “score” for sparkline
+    float compositeScore = (globalPrimaryRatio + globalHedgeRatio) / 2
+    array.unshift(sentimentHistory, (globalPrimaryRatio + globalHedgeRatio) / 2)
+    if array.size(sentimentHistory) > 10
+        array.pop(sentimentHistory)
+    color currentSparkColor = compositeScore > 0.05 ? color.green :      compositeScore < -0.05 ? color.red :      color.orange   
+    // 2) derive a unified colour from it
+    trendCol :=        compositeScore >  sparkThreshold ? color.green    : compositeScore < -sparkThreshold ? color.red    :                                   color.orange 
+    array.unshift(sparklineColors, currentSparkColor)
+    if array.size(sparklineColors) > 10
+        array.pop(sparklineColors)
+    //----------------------------------------
+    // 8) Add separator before info section
+    //----------------------------------------
+    infoSepRow = totalRow + 2
+    for col = 0 to 13
+        table.cell(volTable, col, infoSepRow, "", bgcolor = lightSepColor)
+    
+    //----------------------------------------
+    // 9) INFO ROWS (POC / VAH / VAL)
+    //----------------------------------------
+    infoStart = infoSepRow + 1
+    
+    // Left section: POC, VAH, VAL info
+    // POC row
+    // POC info
+    //table.cell(infoTable, 0, 0, "POC:", text_color = pocColor)
+    //table.cell(infoTable, 1, 0, str.tostring(pocLevel), text_color = pocColor)
+    
+    // VAH info
+    //table.cell(infoTable, 0, 1, "VAH:", text_color = vahColor)
+    //table.cell(infoTable, 1, 1, str.tostring(vahLevel), text_color = vahColor)
+
+    // VAL info
+    //table.cell(infoTable, 0, 2, "VAL:", text_color = valColor)
+    //table.cell(infoTable, 1, 2, str.tostring(valLevel), text_color = valColor)
+    
+    // Right section: Volume-Weighted DIM
+    // Calculate volume-weighted skew as in reference images
+// --- Improved Skew Calculation (Directional Ratio) ---
+// ==================== NEW INFO PANELS CREATION ====================
+// Update info panel with organized data - use horizontal or vertical layout
+if listReady and barstate.islast
+    if useHorizontalLayout
+        updateHorizontalInfoPanel()
+    else
+        updateConsolidatedInfoPanel()
+
+
+
+// Add to your existing indicator code
+// Calculate statistical distribution metrics
+//var float volumeWeightedAvg = na
+//var float volumeStdDev = na
+//var float volumeSkew = na  // Distribution skew (measure of asymmetry)
